@@ -109,6 +109,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 # ntfy.sh notifications
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
+NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
 
 # WhatsApp notifications & bot control (Twilio API)
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
@@ -558,30 +559,48 @@ def send_telegram_alert(author: str, keyword: str, text: str, video_id: str) -> 
 
 
 def send_ntfy_alert(author: str, keyword: str, text: str, video_id: str) -> None:
-    """Send high-priority alert to ntfy.sh with direct click-action URL."""
+    """Send high-priority alert to ntfy with direct click-action URL."""
     if not NTFY_TOPIC:
         return
 
     stream_url = f"https://youtu.be/{video_id}"
-    alert_body = f"{author}: {text}"
+    message_body = f"@{author}: {text}"
+    headers = {
+        "Title": f'Live Chat: "{keyword}"',
+        "Priority": "5",
+        "Tags": "rotating_light,youtube",
+        "Click": stream_url,
+    }
 
+    # 1. Try direct topic POST (standard endpoint)
+    try:
+        url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
+        resp = requests.post(url, data=message_body.encode("utf-8"), headers=headers, timeout=10)
+        if resp.ok:
+            log.info("ntfy alert sent.")
+            return
+        log.warning(f"ntfy direct alert returned status {resp.status_code}")
+    except Exception as error:
+        log.error(f"ntfy alert direct post failed: {error}")
+
+    # 2. Fallback to root JSON POST
     try:
         resp = requests.post(
-            "https://ntfy.sh",
+            NTFY_SERVER,
             json={
                 "topic": NTFY_TOPIC,
                 "title": f'Live Chat: "{keyword}"',
-                "message": alert_body,
+                "message": message_body,
                 "priority": 5,
                 "tags": ["rotating_light", "youtube"],
                 "click": stream_url,
             },
             timeout=10,
         )
-        resp.raise_for_status()
-        log.info("ntfy alert sent.")
+        if resp.ok:
+            log.info("ntfy alert sent via JSON fallback.")
     except Exception as error:
-        log.error(f"ntfy alert failed: {error}")
+        log.error(f"ntfy alert fallback failed: {error}")
 
 
 def send_telegram_live_alert(video_id: str) -> None:
@@ -615,16 +634,31 @@ def send_telegram_live_alert(video_id: str) -> None:
 
 
 def send_ntfy_live_alert(video_id: str) -> None:
-    """Send high-priority alert to ntfy.sh when streamer goes live."""
+    """Send high-priority alert to ntfy when streamer goes live."""
     if not NTFY_TOPIC:
         return
 
     stream_url = f"https://youtu.be/{video_id}"
     alert_body = "Streamer has gone live! Click to watch the stream."
+    headers = {
+        "Title": "🔴 Streamer is LIVE!",
+        "Priority": "4",
+        "Tags": "tv,red_circle,youtube",
+        "Click": stream_url,
+    }
+
+    try:
+        url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
+        resp = requests.post(url, data=alert_body.encode("utf-8"), headers=headers, timeout=10)
+        if resp.ok:
+            log.info("ntfy stream-live alert sent.")
+            return
+    except Exception as error:
+        log.error(f"ntfy stream-live alert failed: {error}")
 
     try:
         resp = requests.post(
-            "https://ntfy.sh",
+            NTFY_SERVER,
             json={
                 "topic": NTFY_TOPIC,
                 "title": "🔴 Streamer is LIVE!",
@@ -635,10 +669,10 @@ def send_ntfy_live_alert(video_id: str) -> None:
             },
             timeout=10,
         )
-        resp.raise_for_status()
-        log.info("ntfy stream-live alert sent.")
+        if resp.ok:
+            log.info("ntfy stream-live alert sent via fallback.")
     except Exception as error:
-        log.error(f"ntfy stream-live alert failed: {error}")
+        log.error(f"ntfy stream-live alert fallback failed: {error}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
