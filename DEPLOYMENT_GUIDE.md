@@ -109,16 +109,16 @@ UptimeRobot will ping your server every 5 minutes so it never goes to sleep!
 
 Open the **ntfy** app on your phone, open your topic, tap the **Send / Pen icon**, and send any command:
 
-| Type this in ntfy | What it does | Confirmation You Receive |
-|---|---|---|
-| **`init`** or **`start`** | **Triggers and starts chat monitoring** | 🟢 *Bot started! Monitoring channel: @Streamer* |
-| **`status`** | Checks bot state, stream live status & uptime | 📊 *Bot Status Report (State, Channel, Matches)* |
-| **`stop`** | Pauses chat monitoring | 🛑 *Bot stopped successfully.* |
-| **`channel @NewStreamer`** | Switches target channel dynamically | ✅ *Target channel updated to: @NewStreamer* |
-| **`keywords solo, 1v1`** | Updates watched keywords on the fly | ✅ *Keywords updated: solo, 1v1* |
-| **`help`** | Shows command list | 🤖 *Command Guide* |
+| Type this in ntfy | Telegram Command | What it does | Confirmation You Receive |
+|---|---|---|---|
+| **`init`** or **`start`** | `/start` | **Triggers and starts chat monitoring** | 🟢 *Bot started! Monitoring channel: @Streamer* |
+| **`status`** | `/status` | Checks bot state, stream live status & uptime | 📊 *Bot Status Report (State, Channel, Matches)* |
+| **`stop`** | `/stop` | Pauses chat monitoring | 🛑 *Bot stopped successfully.* |
+| **`channel @NewStreamer`** | `/channel @NewStreamer` | Switches target channel dynamically | ✅ *Target channel updated to: @NewStreamer* |
+| **`keywords solo, 1v1`** | `/keywords solo, 1v1` | Updates watched keywords on the fly | ✅ *Keywords updated: solo, 1v1* |
+| **`help`** | `/help` | Shows command list | 🤖 *Command Guide / Interactive Buttons* |
 
-When any keyword is typed in the live chat, an alert with a clickable YouTube link will pop up on your phone inside the same topic!
+When any keyword is typed in the live chat, an alert with a clickable YouTube link will pop up on your phone inside both **ntfy** and **Telegram**!
 
 ---
 
