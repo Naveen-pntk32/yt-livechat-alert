@@ -64,26 +64,72 @@ class NtfyController:
         priority: int = 3,
         tags: Optional[List[str]] = None,
     ) -> bool:
-        """Publish a response notification back to the ntfy topic."""
+        """Publish a response notification back to the ntfy topic (with Telegram backup)."""
         if not self.topic:
             return False
 
-        url = self.server_url
-        payload = {
-            "topic": self.topic,
-            "title": title,
-            "message": message,
-            "priority": priority,
-            "tags": tags or ["robot", "gear"],
+        tags_list = tags or ["robot", "gear"]
+        topic_url = f"{self.server_url}/{self.topic}"
+        headers = {
+            "Title": title,
+            "Priority": str(priority),
+            "Tags": ",".join(tags_list),
         }
 
+        auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip()
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        published = False
+
+        # 1. Primary: Direct topic publish (standard ntfy endpoint)
         try:
-            resp = requests.post(url, json=payload, timeout=10)
-            log.info(f"Published response to ntfy topic '{self.topic}': status={resp.status_code}")
-            return resp.ok
+            resp = requests.post(topic_url, data=message.encode("utf-8"), headers=headers, timeout=10)
+            log.info(f"Published direct response to ntfy '{self.topic}': status={resp.status_code}")
+            if resp.ok:
+                published = True
+            elif resp.status_code == 429:
+                log.warning(f"ntfy.sh rate-limited (HTTP 429): {resp.text}")
         except Exception as e:
-            log.error(f"Failed to publish response to ntfy topic {self.topic}: {e}")
-            return False
+            log.error(f"Failed direct publish to ntfy topic {self.topic}: {e}")
+
+        # 2. Fallback: Root JSON publish if direct publish failed
+        if not published:
+            try:
+                json_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+                payload = {
+                    "topic": self.topic,
+                    "title": title,
+                    "message": message,
+                    "priority": priority,
+                    "tags": tags_list,
+                }
+                resp = requests.post(self.server_url, json=payload, headers=json_headers, timeout=10)
+                log.info(f"Published response via root JSON to ntfy: status={resp.status_code}")
+                if resp.ok:
+                    published = True
+            except Exception as e:
+                log.error(f"Fallback root publish failed: {e}")
+
+        # 3. Mirror confirmation to Telegram if configured
+        tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+        if tg_token and tg_chat_id:
+            try:
+                tg_url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+                requests.post(
+                    tg_url,
+                    json={
+                        "chat_id": tg_chat_id,
+                        "text": f"*{title}*\n\n{message}",
+                        "parse_mode": "Markdown",
+                    },
+                    timeout=5,
+                )
+            except Exception as e:
+                log.debug(f"Telegram mirror failed: {e}")
+
+        return published
 
     def is_bot_alert_message(self, text: str, title: str = "", tags: Optional[List[str]] = None) -> bool:
         """
