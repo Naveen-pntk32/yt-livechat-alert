@@ -165,12 +165,13 @@ class NtfyController:
         """Continuous stream subscriber to ntfy.sh JSON endpoint."""
         log.info(f"Connecting to ntfy stream listener for topic: {self.topic}")
         stream_url = f"{self.server_url}/{self.topic}/json"
+        last_id = None
 
         while not self._stop_event.is_set():
             try:
-                # since=now ensures we only process messages sent after connection
-                params = {"since": "now"}
-                resp = requests.get(stream_url, params=params, stream=True, timeout=(10, 60))
+                # Do NOT send since=now (causes HTTP 400). Track last_id across reconnects.
+                params = {"since": last_id} if last_id else None
+                resp = requests.get(stream_url, params=params, stream=True, timeout=(10, None))
 
                 if not resp.ok:
                     log.warning(f"ntfy stream returned HTTP {resp.status_code}. Retrying in 5s...")
@@ -178,7 +179,7 @@ class NtfyController:
                         break
                     continue
 
-                log.info("ntfy stream connection active. Waiting for commands (type 'init' to trigger)...")
+                log.info(f"ntfy stream connection active on '{self.topic}'. Waiting for commands (type 'init' to trigger)...")
 
                 for line in resp.iter_lines():
                     if self._stop_event.is_set():
@@ -190,6 +191,10 @@ class NtfyController:
                         data = json.loads(line.decode("utf-8"))
                     except Exception:
                         continue
+
+                    msg_id = data.get("id")
+                    if msg_id:
+                        last_id = msg_id
 
                     event = data.get("event")
                     if event != "message":
