@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: yt-livechat-alert-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: NTFY_TOPIC
+        sync: false
+      - key: YT_CHANNEL
+        sync: false
+      - key: AUTO_START_BOT
+        value: "false"
+      - key: KEYWORDS
+        value: "solo, 1v1, ff, free fire"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
