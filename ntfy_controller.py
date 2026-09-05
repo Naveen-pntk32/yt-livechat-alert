@@ -68,7 +68,7 @@ class NtfyController:
         if not self.topic:
             return False
 
-        url = f"{self.server_url}/{self.topic}"
+        url = self.server_url
         payload = {
             "topic": self.topic,
             "title": title,
