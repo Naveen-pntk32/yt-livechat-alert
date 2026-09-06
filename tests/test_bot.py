@@ -1,11 +1,12 @@
 """
-Automated Test Suite for YouTube Alert Bot & ntfy Remote Controller
--------------------------------------------------------------------
+Automated Test Suite for YouTube Alert Bot & Controllers
+--------------------------------------------------------
 Validates:
 1. Keyword matching regex with word boundaries (zero false positives).
 2. LiveChatAlertBot thread management, state transitions, dynamic updates.
-3. NtfyController command parsing ('init', 'status', 'stop', 'channel', 'keywords') & loop prevention.
-4. Keep-alive web server endpoints (GET / and GET /status).
+3. @handle resolution, friendly display string formatting, and channel ID conversion.
+4. NtfyController command parsing ('init', 'status', 'stop', 'channel', 'keywords') & loop prevention.
+5. Keep-alive web server endpoints (GET / and GET /status).
 """
 
 import sys
@@ -16,6 +17,7 @@ import json
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -24,6 +26,7 @@ from yt_live_chat_alert import (
     compile_keyword_patterns,
     matches_keyword,
     extract_video_id,
+    resolve_channel_details,
 )
 from ntfy_controller import NtfyController
 from main import app
@@ -58,12 +61,27 @@ class TestLiveChatAlertBotController(unittest.TestCase):
         self.assertEqual(status["state"], "STOPPED")
         self.assertFalse(status["is_running"])
         self.assertEqual(status["target_channel"], "@TestChannel")
+        self.assertEqual(status["target_display"], "@TestChannel")
         self.assertIn("solo", status["keywords"])
+
+    def test_target_display_formatting(self):
+        self.bot.channel_handle = "@iamkokkikumar"
+        self.bot.channel_title = "KOKKI KUMAR YT"
+        self.assertEqual(self.bot.get_target_display(), "@iamkokkikumar (KOKKI KUMAR YT)")
+
+        # Same title as handle
+        self.bot.channel_title = "iamkokkikumar"
+        self.assertEqual(self.bot.get_target_display(), "@iamkokkikumar")
+
+        # No title
+        self.bot.channel_title = None
+        self.assertEqual(self.bot.get_target_display(), "@iamkokkikumar")
 
     def test_update_channel(self):
         success, msg = self.bot.update_channel("@NewStreamer")
         self.assertTrue(success)
         self.assertEqual(self.bot.channel, "@NewStreamer")
+        self.assertIn("@NewStreamer", msg)
 
     def test_update_keywords(self):
         success, msg = self.bot.update_keywords(["ff", "ranked", "squad"])
@@ -94,25 +112,21 @@ class TestLiveChatAlertBotController(unittest.TestCase):
         self.assertEqual(status["messages_scanned"], 2)
 
     def test_dynamic_keyword_updates_and_spam_reset(self):
-        # Initial keywords from setUp are ["solo", "custom"]
         self.assertEqual(self.bot.keywords, ["solo", "custom"])
         kw_func = lambda: self.bot.keyword_patterns
         self.assertEqual(matches_keyword("playing solo today", patterns=kw_func()), "solo")
         self.assertIsNone(matches_keyword("playing squad today", patterns=kw_func()))
 
-        # Dynamically update keywords
         self.bot.update_keywords(["squad", "clutch"])
         self.assertEqual(matches_keyword("playing squad today", patterns=kw_func()), "squad")
         self.assertIsNone(matches_keyword("playing solo today", patterns=kw_func()))
 
     def test_channel_ownership_verification_logic(self):
         from yt_live_chat_alert import is_video_from_channel
-        # Empty inputs return False
         self.assertFalse(is_video_from_channel("", "UC123"))
         self.assertFalse(is_video_from_channel("vid123", ""))
 
     def test_state_persistence(self):
-        # Ensure state saving and loading works without error
         self.bot.update_channel("@PersistChannel")
         self.bot.update_keywords(["persist_kw"])
         self.assertEqual(self.bot.channel, "@PersistChannel")
@@ -153,7 +167,8 @@ class TestLiveChatAlertBotController(unittest.TestCase):
 
 class TestNtfyController(unittest.TestCase):
     def setUp(self):
-        self.bot = LiveChatAlertBot(channel="@GamerLive", keywords=["solo", "ff"])
+        self.bot = LiveChatAlertBot(channel="@GamerLive", keywords=["solo", "ff"], idle_check_interval=1)
+        self.bot.channel_id = "UCdummy1234567890123456"
         self.ntfy = NtfyController(self.bot, topic="test-yt-alert-topic")
 
     def tearDown(self):
@@ -161,7 +176,6 @@ class TestNtfyController(unittest.TestCase):
             self.bot.stop()
 
     def test_init_command_triggers_bot(self):
-        # User types 'init' in the ntfy app
         res = self.ntfy.handle_command("init")
         self.assertIsNotNone(res)
         body, title, priority = res
@@ -175,6 +189,12 @@ class TestNtfyController(unittest.TestCase):
         body, title, priority = res
         self.assertIn("YouTube Alert Bot", body)
         self.assertIn("@GamerLive", body)
+
+    def test_channel_command_shows_handle(self):
+        res = self.ntfy.handle_command("channel")
+        self.assertIsNotNone(res)
+        body, title, priority = res
+        self.assertIn("Current target: @GamerLive", body)
 
     def test_stop_command(self):
         self.bot.start()
@@ -200,11 +220,9 @@ class TestNtfyController(unittest.TestCase):
         self.assertEqual(self.bot.keywords, ["custom", "tournament", "rush"])
 
     def test_loop_prevention(self):
-        # Ensure outgoing bot alerts are identified and not processed as commands
         self.assertTrue(self.ntfy.is_bot_alert_message("🚨 YouTube Live Chat Alert: 'solo' by Player"))
         self.assertTrue(self.ntfy.is_bot_alert_message("🔴 Streamer is LIVE!"))
         self.assertTrue(self.ntfy.is_bot_alert_message("🟢 Bot started!"))
-        # User command 'init' or 'status' is NOT a bot alert
         self.assertFalse(self.ntfy.is_bot_alert_message("init"))
         self.assertFalse(self.ntfy.is_bot_alert_message("status"))
         self.assertFalse(self.ntfy.is_bot_alert_message("channel @Streamer"))

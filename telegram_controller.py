@@ -120,7 +120,7 @@ class TelegramController:
 
         elif cmd in ("/channel", "channel", "/setchannel"):
             if not args:
-                curr = self.bot.channel or "None configured"
+                curr = self.bot.get_target_display() if hasattr(self.bot, "get_target_display") else (self.bot.channel or "None configured")
                 return (
                     f"📺 *Current Monitored Target:* `{curr}`\n\n"
                     "To switch targets, send:\n"

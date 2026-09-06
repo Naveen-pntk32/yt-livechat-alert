@@ -97,7 +97,7 @@ def health_dashboard():
     <div class="card">
         <h1><span class="status-dot"></span> YouTube Alert Bot</h1>
         <div class="row"><span class="label">State</span><span class="val" style="color:{state_color};">{status['state']}</span></div>
-        <div class="row"><span class="label">Target Channel</span><span class="val">{status['target_channel'] or 'None'}</span></div>
+        <div class="row"><span class="label">Target Channel</span><span class="val">{status.get('target_display') or status['target_channel'] or 'None'}</span></div>
         <div class="row"><span class="label">Stream Status</span><span class="val">{stream_badge}</span></div>
         <div class="row"><span class="label">ntfy Remote Control</span><span class="val">{ntfy_status}</span></div>
         <div class="row"><span class="label">Telegram Remote</span><span class="val">{tg_status}</span></div>

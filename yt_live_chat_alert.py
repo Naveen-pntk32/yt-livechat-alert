@@ -267,12 +267,38 @@ def extract_video_id(url_or_id: str) -> Optional[str]:
     return None
 
 
-def resolve_channel_id(api_manager: YouTubeApiManager, channel_input: str) -> str:
+def resolve_channel_details(
+    api_manager: Optional[YouTubeApiManager],
+    channel_input: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Accepts a channel ID, @handle, full channel URL, or direct video URL/ID,
-    and returns the canonical channel ID (UC...).
+    Accepts channel ID (UC...), @handle, full channel URL, or direct video URL/ID.
+    Returns: (canonical_channel_id, handle, channel_title)
+    Tries zero-quota web lookup first, then official API fallback.
     """
     channel_input = channel_input.strip()
+    if not channel_input:
+        return None, None, None
+
+    channel_id: Optional[str] = None
+    handle: Optional[str] = None
+    title: Optional[str] = None
+
+    def _clean_title(t: Optional[str]) -> Optional[str]:
+        if not t:
+            return None
+        t = t.strip()
+        if t.endswith(" - YouTube"):
+            t = t[:-10].strip()
+        return t or None
+
+    def _clean_handle(h: Optional[str]) -> Optional[str]:
+        if not h:
+            return None
+        h = h.strip().lstrip("/")
+        if not h.startswith("@"):
+            h = f"@{h}"
+        return h
 
     # Case 0: Direct video link or ID provided
     vid = extract_video_id(channel_input)
@@ -280,82 +306,134 @@ def resolve_channel_id(api_manager: YouTubeApiManager, channel_input: str) -> st
         try:
             resp = requests.get(f"https://www.youtube.com/watch?v={vid}", headers=_WEB_HEADERS, timeout=10)
             if resp.ok:
-                m = re.search(r'itemprop="channelId"\s+content="(UC[\w-]{22})"', resp.text)
-                if not m:
-                    m = re.search(r'"channelId":"(UC[\w-]{22})"', resp.text)
+                m = re.search(r'itemprop="channelId"\s+content="(UC[\w-]{22})"', resp.text) or re.search(r'"channelId":"(UC[\w-]{22})"', resp.text)
                 if m:
-                    cid = m.group(1)
-                    log.info(f"Resolved video {vid} -> channel {cid} (via web lookup)")
-                    return cid
-        except Exception:
-            pass
+                    channel_id = m.group(1)
+                hm = re.search(r'"canonicalBaseUrl":"(/@[^"]+)"', resp.text) or re.search(r'"vanityChannelUrl":"http[s]?://www\.youtube\.com/(@[^"]+)"', resp.text)
+                if hm:
+                    handle = _clean_handle(hm.group(1))
+                tm = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
+                if tm:
+                    title = _clean_title(tm.group(1))
+        except Exception as e:
+            log.debug(f"Web video lookup failed for {vid}: {e}")
 
-        service = api_manager.get_service()
-        if service:
-            try:
-                res = service.videos().list(part="snippet", id=vid).execute()
-                items = res.get("items", [])
-                if items:
-                    cid = items[0]["snippet"].get("channelId")
-                    if cid:
-                        log.info(f"Resolved video {vid} -> channel {cid} (via API)")
-                        return cid
-            except Exception:
-                pass
+        # API fallback for video
+        if (not channel_id or not handle) and api_manager:
+            service = api_manager.get_service()
+            if service:
+                try:
+                    res = service.videos().list(part="snippet", id=vid).execute()
+                    items = res.get("items", [])
+                    if items:
+                        snip = items[0]["snippet"]
+                        channel_id = channel_id or snip.get("channelId")
+                        title = title or snip.get("channelTitle")
+                except Exception as e:
+                    log.debug(f"API video lookup failed for {vid}: {e}")
 
-        return vid
-
-    # Case 1: Already a standard channel ID
-    if channel_input.startswith("UC") and len(channel_input) == 24:
-        return channel_input
+        # If video gave us channel_id but no handle yet, resolve channel_id
+        if channel_id and not handle:
+            sub_cid, sub_handle, sub_title = resolve_channel_details(api_manager, channel_id)
+            return channel_id, sub_handle or handle, sub_title or title
+        return channel_id or vid, handle, title
 
     # Extract ID or handle from full URL
     match = re.search(
         r"youtube\.com/(channel/(UC[\w-]{22})|@([\w.-]+))",
         channel_input,
     )
-    if match and match.group(2):
-        return match.group(2)
+    if match:
+        if match.group(2):
+            channel_input = match.group(2)
+        elif match.group(3):
+            channel_input = "@" + match.group(3)
 
-    if match and match.group(3):
-        handle = "@" + match.group(3)
-    elif channel_input.startswith("@"):
-        handle = channel_input
-    else:
-        handle = "@" + channel_input
+    # Case 1: Already a standard channel ID
+    if channel_input.startswith("UC") and len(channel_input) == 24:
+        channel_id = channel_input
+        try:
+            url = f"https://www.youtube.com/channel/{channel_id}"
+            resp = requests.get(url, headers=_WEB_HEADERS, timeout=10)
+            if resp.ok:
+                hm = re.search(r'"canonicalBaseUrl":"(/@[^"]+)"', resp.text) or re.search(r'"vanityChannelUrl":"http[s]?://www\.youtube\.com/(@[^"]+)"', resp.text)
+                if hm:
+                    handle = _clean_handle(hm.group(1))
+                tm = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
+                if tm:
+                    title = _clean_title(tm.group(1))
+        except Exception as e:
+            log.debug(f"Web channel lookup failed for {channel_id}: {e}")
+
+        # API fallback for channel ID
+        if (not handle or not title) and api_manager:
+            service = api_manager.get_service()
+            if service:
+                try:
+                    res = service.channels().list(part="snippet", id=channel_id).execute()
+                    items = res.get("items", [])
+                    if items:
+                        snip = items[0]["snippet"]
+                        title = title or _clean_title(snip.get("title"))
+                        cust = snip.get("customUrl")
+                        if cust:
+                            handle = handle or _clean_handle(cust)
+                except Exception as e:
+                    log.debug(f"API channel lookup failed for {channel_id}: {e}")
+
+        return channel_id, handle, title
+
+    # Case 2: Handle input (@handle or handle)
+    handle = _clean_handle(channel_input)
 
     # Step 1: Try zero-quota web scraping first
     try:
         url = f"https://www.youtube.com/{handle}"
         resp = requests.get(url, headers=_WEB_HEADERS, timeout=10)
         if resp.ok:
-            # Look for canonical channel ID in page meta / JSON
-            m = re.search(r'itemprop="channelId"\s+content="(UC[\w-]{22})"', resp.text)
-            if not m:
-                m = re.search(r'"browseId":"(UC[\w-]{22})"', resp.text)
-            if m:
-                channel_id = m.group(1)
-                log.info(f"Resolved handle {handle} -> {channel_id} (via web lookup)")
-                return channel_id
+            cid_m = re.search(r'itemprop="channelId"\s+content="(UC[\w-]{22})"', resp.text) or re.search(r'"browseId":"(UC[\w-]{22})"', resp.text)
+            if cid_m:
+                channel_id = cid_m.group(1)
+            tm = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
+            if tm:
+                title = _clean_title(tm.group(1))
+            hm = re.search(r'"canonicalBaseUrl":"(/@[^"]+)"', resp.text)
+            if hm:
+                handle = _clean_handle(hm.group(1))
     except Exception as e:
-        log.debug(f"Web handle resolution failed: {e}")
+        log.debug(f"Web handle resolution failed for {handle}: {e}")
 
     # Step 2: Try Official API if configured
-    service = api_manager.get_service()
-    if service:
-        try:
-            response = service.channels().list(
-                part="id",
-                forHandle=handle,
-            ).execute()
-            items = response.get("items", [])
-            if items:
-                channel_id = items[0]["id"]
-                log.info(f"Resolved handle {handle} -> {channel_id} (via official API)")
-                return channel_id
-        except Exception as e:
-            log.warning(f"API handle resolution failed: {e}")
+    if (not channel_id or not title) and api_manager:
+        service = api_manager.get_service()
+        if service:
+            try:
+                response = service.channels().list(
+                    part="snippet",
+                    forHandle=handle,
+                ).execute()
+                items = response.get("items", [])
+                if items:
+                    channel_id = channel_id or items[0]["id"]
+                    snip = items[0]["snippet"]
+                    title = title or _clean_title(snip.get("title"))
+                    cust = snip.get("customUrl")
+                    if cust:
+                        handle = _clean_handle(cust)
+            except Exception as e:
+                log.warning(f"API handle resolution failed for {handle}: {e}")
 
+    return channel_id, handle, title
+
+
+def resolve_channel_id(api_manager: YouTubeApiManager, channel_input: str) -> str:
+    """
+    Accepts a channel ID, @handle, full channel URL, or direct video URL/ID,
+    and returns the canonical channel ID (UC...).
+    """
+    cid, _, _ = resolve_channel_details(api_manager, channel_input)
+    if cid:
+        return cid
     raise RuntimeError(f"Could not resolve channel ID for input: {channel_input}")
 
 
@@ -1377,6 +1455,8 @@ class LiveChatAlertBot:
         idle_check_interval: Optional[int] = None,
     ):
         self.channel = (channel or FAVORITE_CHANNEL).strip()
+        self.channel_handle: Optional[str] = self.channel if self.channel.startswith("@") else None
+        self.channel_title: Optional[str] = None
         self.keywords = list(keywords) if keywords is not None else list(KEYWORDS)
         self.api_keys = list(api_keys) if api_keys is not None else list(YOUTUBE_API_KEYS)
         self.api_manager = YouTubeApiManager(self.api_keys)
@@ -1392,7 +1472,7 @@ class LiveChatAlertBot:
         self.direct_video_id: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         self.state = "STOPPED"  # STOPPED, STARTING, RESOLVING, MONITORING, LIVE_STREAMING, ERROR
         self.current_video_id: Optional[str] = None
@@ -1410,12 +1490,19 @@ class LiveChatAlertBot:
                 with open(_STATE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 saved_channel = data.get("channel")
+                saved_handle = data.get("channel_handle")
+                saved_title = data.get("channel_title")
                 saved_keywords = data.get("keywords")
                 if saved_channel:
                     self.channel = saved_channel
+                if saved_handle:
+                    self.channel_handle = saved_handle
+                if saved_title:
+                    self.channel_title = saved_title
                 if saved_keywords and isinstance(saved_keywords, list):
                     self.keywords = [k.strip() for k in saved_keywords if k.strip()]
-                log.info(f"Loaded persistent bot state: target='{self.channel}', keywords={self.keywords}")
+                display = self.channel_handle or self.channel
+                log.info(f"Loaded persistent bot state: target='{display}', keywords={self.keywords}")
             except Exception as e:
                 log.warning(f"Could not load bot state file: {e}")
 
@@ -1423,12 +1510,69 @@ class LiveChatAlertBot:
         try:
             data = {
                 "channel": self.channel,
+                "channel_handle": self.channel_handle,
+                "channel_title": self.channel_title,
                 "keywords": self.keywords,
             }
             with open(_STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             log.warning(f"Could not save bot state file: {e}")
+
+    def _resolve_target_info_locked(self) -> None:
+        """Resolves channel ID, @handle, and title for self.channel, caching results."""
+        if not self.channel:
+            return
+
+        # If already resolved or previously attempted for this exact target, skip
+        if (self.channel_id and self.channel_handle) or getattr(self, "_resolution_attempted_target", None) == self.channel:
+            return
+
+        self._resolution_attempted_target = self.channel
+        try:
+            cid, handle, title = resolve_channel_details(self.api_manager, self.channel)
+            if cid:
+                self.channel_id = cid
+            if handle:
+                self.channel_handle = handle
+            if title:
+                self.channel_title = title
+            self._save_state()
+        except Exception as e:
+            log.debug(f"Target resolution attempt failed for '{self.channel}': {e}")
+
+    def get_target_display(self) -> str:
+        """
+        Returns a friendly display string for the target channel.
+        Prefers @handle (e.g. '@iamkokkikumar (KOKKI KUMAR YT)'), avoiding raw channel IDs.
+        """
+        with self._lock:
+            if not self.channel:
+                return "None configured"
+
+            # If handle not yet resolved and target is a channel ID or URL, resolve once
+            if not self.channel_handle and (
+                self.channel.startswith("UC")
+                or "youtube.com" in self.channel
+                or "youtu.be" in self.channel
+            ):
+                self._resolve_target_info_locked()
+
+            if self.channel_handle:
+                handle = self.channel_handle if self.channel_handle.startswith("@") else f"@{self.channel_handle}"
+                if self.channel_title and self.channel_title.strip().lower() != handle.lstrip("@").lower():
+                    return f"{handle} ({self.channel_title.strip()})"
+                return handle
+
+            if self.channel.startswith("@"):
+                if self.channel_title:
+                    return f"{self.channel} ({self.channel_title.strip()})"
+                return self.channel
+
+            if self.channel_title:
+                return self.channel_title
+
+            return self.channel
 
     @property
     def is_running(self) -> bool:
@@ -1448,8 +1592,9 @@ class LiveChatAlertBot:
             self.last_error = None
             self._thread = threading.Thread(target=self._worker_loop, name="yt_alert_worker", daemon=True)
             self._thread.start()
-            log.info(f"LiveChatAlertBot worker started for target: {self.channel}")
-            return True, f"🟢 Bot started! Monitoring channel: {self.channel}"
+            target_display = self.get_target_display()
+            log.info(f"LiveChatAlertBot worker started for target: {target_display}")
+            return True, f"🟢 Bot started! Monitoring channel: {target_display}"
 
     def stop(self) -> Tuple[bool, str]:
         with self._lock:
@@ -1481,15 +1626,21 @@ class LiveChatAlertBot:
         with self._lock:
             self.channel = new_channel
             self.channel_id = None
+            self.channel_handle = new_channel if new_channel.startswith("@") else None
+            self.channel_title = None
             self.direct_video_id = None
             self.current_video_id = None
             self.messages_scanned = 0
+            self._resolution_attempted_target = None
+            if not self.channel_handle:
+                self._resolve_target_info_locked()
+            display_name = self.get_target_display()
             self._save_state()
 
         if was_running:
             self.start()
 
-        return True, f"✅ Target channel updated to: {new_channel}"
+        return True, f"✅ Target channel updated to: {display_name}"
 
     def update_keywords(self, new_keywords: List[str]) -> Tuple[bool, str]:
         cleaned = [k.strip() for k in new_keywords if k.strip()]
@@ -1533,6 +1684,9 @@ class LiveChatAlertBot:
                 "state": self.state,
                 "is_running": self.is_running,
                 "target_channel": self.channel,
+                "target_display": self.get_target_display(),
+                "channel_handle": self.channel_handle,
+                "channel_title": self.channel_title,
                 "resolved_channel_id": self.channel_id,
                 "direct_video_id": self.direct_video_id,
                 "current_video_id": self.current_video_id,
@@ -1555,7 +1709,7 @@ class LiveChatAlertBot:
 
         lines = [
             f"{state_emoji} *YouTube Alert Bot: {s['state']}*",
-            f"• *Target:* {s['target_channel'] or 'None'}",
+            f"• *Target:* {s['target_display'] or s['target_channel'] or 'None'}",
             f"• *Stream Status:* {live_emoji}",
         ]
         if s["is_stream_live"]:
@@ -1577,7 +1731,7 @@ class LiveChatAlertBot:
         return "\n".join(lines)
 
     def _worker_loop(self) -> None:
-        log.info(f"Bot worker started for target: {self.channel}")
+        log.info(f"Bot worker started for target: {self.get_target_display()}")
         last_notified_video_id = None
 
         while not self._stop_event.is_set():
@@ -1589,9 +1743,12 @@ class LiveChatAlertBot:
                     if vid:
                         self.direct_video_id = vid
                         log.info(f"Target identified as direct video ID: {vid}")
+                        self._resolve_target_info_locked()
                     else:
-                        self.channel_id = resolve_channel_id(self.api_manager, self.channel)
-                        log.info(f"Resolved channel ID: {self.channel_id}")
+                        self._resolve_target_info_locked()
+                        if not self.channel_id:
+                            self.channel_id = resolve_channel_id(self.api_manager, self.channel)
+                        log.info(f"Resolved target '{self.get_target_display()}' -> Channel ID: {self.channel_id}")
                 except Exception as e:
                     self.last_error = f"Failed to resolve target '{self.channel}': {e}"
                     log.error(self.last_error)
