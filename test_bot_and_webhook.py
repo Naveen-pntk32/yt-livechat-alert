@@ -118,6 +118,14 @@ class TestLiveChatAlertBotController(unittest.TestCase):
         self.assertEqual(self.bot.channel, "@PersistChannel")
         self.assertEqual(self.bot.keywords, ["persist_kw"])
 
+    def test_format_author(self):
+        from yt_live_chat_alert import format_author
+        self.assertEqual(format_author("NAVEEN-PNTk"), "@NAVEEN-PNTk")
+        self.assertEqual(format_author("@NAVEEN-PNTk"), "@NAVEEN-PNTk")
+        self.assertEqual(format_author("@@NAVEEN-PNTk"), "@NAVEEN-PNTk")
+        self.assertEqual(format_author(""), "@Anonymous")
+        self.assertEqual(format_author(None), "@Anonymous")
+
 
 class TestNtfyController(unittest.TestCase):
     def setUp(self):

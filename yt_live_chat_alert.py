@@ -700,16 +700,23 @@ def should_send_alert(author: str, keyword: str, text: str) -> bool:
 # ALERT DISPATCH (Telegram & ntfy)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def format_author(author: str) -> str:
+    """Ensure username is cleanly formatted with exactly one leading '@'."""
+    clean = (author or "").strip().lstrip("@")
+    return f"@{clean}" if clean else "@Anonymous"
+
+
 def send_telegram_alert(author: str, keyword: str, text: str, video_id: str) -> None:
     """Send formatted alert to Telegram with stream link."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
+    author_display = format_author(author)
     stream_url = f"https://youtu.be/{video_id}"
     message = (
         f"🚨 *YouTube Live Chat Alert*\n\n"
         f"• *Keyword:* `{keyword}`\n"
-        f"• *User:* {author}\n"
+        f"• *User:* {author_display}\n"
         f"• *Message:* {text}\n\n"
         f"🔗 [Watch Stream Live]({stream_url})"
     )
@@ -734,7 +741,7 @@ def send_telegram_alert(author: str, keyword: str, text: str, video_id: str) -> 
             plain_text = (
                 f"YouTube Live Chat Alert\n\n"
                 f"• Keyword: {keyword}\n"
-                f"• User: {author}\n"
+                f"• User: {author_display}\n"
                 f"• Message: {text}\n\n"
                 f"Watch Stream: {stream_url}"
             )
@@ -760,8 +767,9 @@ def send_ntfy_alert(author: str, keyword: str, text: str, video_id: str) -> None
     if not NTFY_TOPIC:
         return
 
+    author_display = format_author(author)
     stream_url = f"https://youtu.be/{video_id}"
-    message_body = f"@{author}: {text}"
+    message_body = f"{author_display}: {text}"
     headers = {
         "Title": f'Live Chat: "{keyword}"',
         "Priority": "5",
@@ -913,11 +921,12 @@ def send_whatsapp_message(body: str, to_number: Optional[str] = None) -> bool:
 
 def send_whatsapp_alert(author: str, keyword: str, text: str, video_id: str) -> None:
     """Send formatted alert to WhatsApp with stream link."""
+    author_display = format_author(author)
     stream_url = f"https://youtu.be/{video_id}"
     msg = (
         f"🚨 *YouTube Live Chat Alert*\n\n"
         f"• *Keyword:* `{keyword}`\n"
-        f"• *User:* {author}\n"
+        f"• *User:* {author_display}\n"
         f"• *Message:* {text}\n\n"
         f"🔗 Watch Stream: {stream_url}"
     )
@@ -1579,7 +1588,8 @@ class LiveChatAlertBot:
         ])
         if s.get("last_alert_details"):
             last = s["last_alert_details"]
-            lines.append(f"• *Last Match:* `{last['keyword']}` by {last['author']}")
+            author_display = format_author(last.get("author", ""))
+            lines.append(f"• *Last Match:* `{last['keyword']}` by {author_display}")
         if s.get("last_error"):
             lines.append(f"⚠️ *Last Error:* {s['last_error']}")
         return "\n".join(lines)
