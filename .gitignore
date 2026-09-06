@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 *.log
+bot_state.json

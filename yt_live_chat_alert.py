@@ -40,6 +40,7 @@ import time
 import json
 import logging
 import threading
+from pathlib import Path
 from collections import deque
 import concurrent.futures
 from typing import Optional, Tuple, List, Dict, Callable, Any
@@ -403,9 +404,52 @@ def is_video_actually_live(video_id: str, api_manager: Optional[YouTubeApiManage
     return False
 
 
+def is_video_from_channel(
+    video_id: str,
+    channel_id: str,
+    api_manager: Optional[YouTubeApiManager] = None,
+) -> bool:
+    """
+    Verifies that a video ACTUALLY belongs to the specified channel,
+    preventing recommended, featured, or sidebar streams from false-triggering.
+    """
+    if not video_id or not channel_id:
+        return False
+
+    # Check 1: Official API check if available (fast and 100% accurate)
+    if api_manager and api_manager.has_keys:
+        service = api_manager.get_service()
+        if service:
+            try:
+                resp = service.videos().list(part="snippet", id=video_id).execute()
+                items = resp.get("items", [])
+                if items:
+                    owner_cid = items[0]["snippet"].get("channelId", "")
+                    return owner_cid == channel_id
+            except Exception:
+                pass
+
+    # Check 2: Zero-quota watch page check
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        resp = requests.get(url, headers=_WEB_HEADERS, timeout=10)
+        if resp.ok:
+            m = re.search(r'itemprop="channelId"\s+content="(UC[\w-]{22})"', resp.text)
+            if not m:
+                m = re.search(r'"channelId":"(UC[\w-]{22})"', resp.text)
+            if not m:
+                m = re.search(r'"externalChannelId":"(UC[\w-]{22})"', resp.text)
+            if m:
+                return m.group(1) == channel_id
+    except Exception as e:
+        log.debug(f"Channel ownership verification error for {video_id}: {e}")
+
+    return False
+
+
 def find_live_video_id_api(api_manager: YouTubeApiManager, channel_id: str) -> Optional[str]:
     """
-    Official API search for active live broadcast on the channel.
+    Official API search for active live broadcast strictly belonging to the channel.
     Returns video_id or None.
     """
     service = api_manager.get_service()
@@ -422,7 +466,7 @@ def find_live_video_id_api(api_manager: YouTubeApiManager, channel_id: str) -> O
         items = response.get("items", [])
         if items:
             vid = items[0]["id"]["videoId"]
-            log.info(f"Official API identified active live broadcast: {vid}")
+            log.info(f"Official API identified channel live broadcast: {vid}")
             return vid
     except Exception as e:
         if is_quota_exceeded_error(e):
@@ -438,14 +482,22 @@ def find_candidate_video_id(
     api_manager: Optional[YouTubeApiManager] = None,
 ) -> Optional[str]:
     """
-    Multi-tier live stream detector:
-    1. Zero-quota web check on /channel/UC.../live (redirect and inline JSON)
-    2. Zero-quota web check on /channel/UC.../streams
-    3. Official YouTube Data API fallback (100% reliable)
+    Multi-tier live stream detector with strict channel ownership verification:
+    1. Official YouTube Data API first if configured (100% accurate & channel-locked)
+    2. Zero-quota web check on /channel/UC.../live (verified by channelId)
+    3. Zero-quota web check on /channel/UC.../streams (verified by channelId)
     """
+    # Strategy 1: Official YouTube Data API first if keys are available
+    # API search by channelId guarantees zero false positives and never picks up other channels!
+    if api_manager and api_manager.has_keys:
+        api_vid = find_live_video_id_api(api_manager, channel_id)
+        if api_vid:
+            log.info(f"Found active live stream via Official API: {api_vid}")
+            return api_vid
+
     candidate_ids = []
 
-    # Strategy 1: Check /channel/UC.../live
+    # Strategy 2: Check /channel/UC.../live
     live_url = f"https://www.youtube.com/channel/{channel_id}/live"
     try:
         resp = requests.get(live_url, headers=_WEB_HEADERS, timeout=10, allow_redirects=True)
@@ -466,23 +518,18 @@ def find_candidate_video_id(
             for vid in watch_endpoints:
                 if vid not in candidate_ids:
                     candidate_ids.append(vid)
-
-            # Extract candidate videoIds from inline JSON
-            for m in re.finditer(r'"videoId":"([a-zA-Z0-9_-]{11})"', resp.text):
-                vid = m.group(1)
-                if vid not in candidate_ids:
-                    candidate_ids.append(vid)
-                if len(candidate_ids) >= 15:
-                    break
     except Exception as e:
         log.debug(f"Web /live lookup error for channel {channel_id}: {e}")
 
     for vid in candidate_ids:
         if is_video_actually_live(vid, api_manager=api_manager):
-            log.info(f"Found active live stream via /live scrape: {vid}")
-            return vid
+            if is_video_from_channel(vid, channel_id, api_manager=api_manager):
+                log.info(f"Found active live stream for channel {channel_id}: {vid}")
+                return vid
+            else:
+                log.info(f"Ignoring recommended live stream {vid} (does not belong to channel {channel_id})")
 
-    # Strategy 2: Check /channel/UC.../streams
+    # Strategy 3: Check /channel/UC.../streams
     streams_url = f"https://www.youtube.com/channel/{channel_id}/streams"
     streams_candidates = []
     try:
@@ -492,22 +539,18 @@ def find_candidate_video_id(
                 vid = m.group(1)
                 if vid not in candidate_ids and vid not in streams_candidates:
                     streams_candidates.append(vid)
-                if len(streams_candidates) >= 10:
+                if len(streams_candidates) >= 6:
                     break
     except Exception as e:
         log.debug(f"Web /streams lookup error for channel {channel_id}: {e}")
 
     for vid in streams_candidates:
         if is_video_actually_live(vid, api_manager=api_manager):
-            log.info(f"Found active live stream via /streams scrape: {vid}")
-            return vid
-
-    # Strategy 3: Official YouTube Data API fallback
-    if api_manager and api_manager.has_keys:
-        api_vid = find_live_video_id_api(api_manager, channel_id)
-        if api_vid:
-            log.info(f"Found active live stream via Official API fallback: {api_vid}")
-            return api_vid
+            if is_video_from_channel(vid, channel_id, api_manager=api_manager):
+                log.info(f"Found active live stream via /streams for channel {channel_id}: {vid}")
+                return vid
+            else:
+                log.info(f"Ignoring non-channel live stream {vid}")
 
     return None
 
@@ -575,6 +618,14 @@ def _cleanup_anti_spam_cache(now: float, max_age: float = 300.0) -> None:
         expired = [k for k, ts in cache.items() if ts < cutoff]
         for k in expired:
             del cache[k]
+
+
+def reset_anti_spam_cache() -> None:
+    """Purges all anti-spam and cooldown timestamps so new keywords or messages trigger alerts immediately."""
+    _user_keyword_timestamps.clear()
+    _user_message_timestamps.clear()
+    _global_message_timestamps.clear()
+    _last_alert_timestamps.clear()
 
 
 def strip_emoji_placeholders(text: str) -> str:
@@ -962,6 +1013,7 @@ def watch_chat_innertube(
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
     on_message: Optional[Callable[[str, str], None]] = None,
+    get_patterns: Optional[Callable[[], List[Tuple[str, re.Pattern]]]] = None,
 ) -> bool:
     """
     Streams YouTube live chat in real time directly through YouTube's web
@@ -1046,7 +1098,8 @@ def watch_chat_innertube(
                             except Exception:
                                 pass
                         cleaned_text = strip_emoji_placeholders(raw_text)
-                        matched_kw = matches_keyword(cleaned_text, patterns=patterns)
+                        active_patterns = get_patterns() if get_patterns else patterns
+                        matched_kw = matches_keyword(cleaned_text, patterns=active_patterns)
                         if matched_kw:
                             dispatch_alerts(author, matched_kw, cleaned_text, video_id, on_match=on_match)
 
@@ -1087,6 +1140,7 @@ def watch_chat_chatdownloader(
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
     on_message: Optional[Callable[[str, str], None]] = None,
+    get_patterns: Optional[Callable[[], List[Tuple[str, re.Pattern]]]] = None,
 ) -> bool:
     """Secondary 0-quota fallback using chat-downloader."""
     if not CHAT_DOWNLOADER_AVAILABLE:
@@ -1116,7 +1170,8 @@ def watch_chat_chatdownloader(
                     pass
 
             cleaned_text = strip_emoji_placeholders(raw_text)
-            matched_kw = matches_keyword(cleaned_text, patterns=patterns)
+            active_patterns = get_patterns() if get_patterns else patterns
+            matched_kw = matches_keyword(cleaned_text, patterns=active_patterns)
             if matched_kw:
                 dispatch_alerts(author, matched_kw, cleaned_text, video_id, on_match=on_match)
 
@@ -1139,6 +1194,7 @@ def watch_chat_api(
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
     on_message: Optional[Callable[[str, str], None]] = None,
+    get_patterns: Optional[Callable[[], List[Tuple[str, re.Pattern]]]] = None,
 ) -> None:
     """
     Monitors live chat using the official YouTube Data API.
@@ -1217,7 +1273,8 @@ def watch_chat_api(
                     pass
 
             cleaned_text = strip_emoji_placeholders(raw_text)
-            matched_kw = matches_keyword(cleaned_text, patterns=patterns)
+            active_patterns = get_patterns() if get_patterns else patterns
+            matched_kw = matches_keyword(cleaned_text, patterns=active_patterns)
 
             if matched_kw:
                 dispatch_alerts(author, matched_kw, cleaned_text, video_id, on_match=on_match)
@@ -1244,19 +1301,34 @@ def watch_chat_hybrid(
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
     on_message: Optional[Callable[[str, str], None]] = None,
+    get_patterns: Optional[Callable[[], List[Tuple[str, re.Pattern]]]] = None,
 ) -> None:
     """
     Executes primary 0-quota Innertube engine -> chat-downloader -> Official API fallback.
     """
     # Tier 1: Primary Native Innertube (0 Quota)
-    if watch_chat_innertube(video_id, stop_event=stop_event, patterns=patterns, on_match=on_match, on_message=on_message):
+    if watch_chat_innertube(
+        video_id,
+        stop_event=stop_event,
+        patterns=patterns,
+        on_match=on_match,
+        on_message=on_message,
+        get_patterns=get_patterns,
+    ):
         return
 
     if stop_event and stop_event.is_set():
         return
 
     # Tier 2: chat-downloader (0 Quota)
-    if watch_chat_chatdownloader(video_id, stop_event=stop_event, patterns=patterns, on_match=on_match, on_message=on_message):
+    if watch_chat_chatdownloader(
+        video_id,
+        stop_event=stop_event,
+        patterns=patterns,
+        on_match=on_match,
+        on_message=on_message,
+        get_patterns=get_patterns,
+    ):
         return
 
     if stop_event and stop_event.is_set():
@@ -1279,6 +1351,7 @@ def watch_chat_hybrid(
             patterns=patterns,
             on_match=on_match,
             on_message=on_message,
+            get_patterns=get_patterns,
         )
     else:
         log.warning(
@@ -1294,6 +1367,9 @@ def watch_chat_hybrid(
 # ─────────────────────────────────────────────────────────────────────────────
 # CONTROLLER: LIVE CHAT ALERT BOT (Thread-Safe & Dynamic)
 # ─────────────────────────────────────────────────────────────────────────────
+
+_STATE_FILE = Path(__file__).resolve().parent / "bot_state.json"
+
 
 class LiveChatAlertBot:
     """
@@ -1311,10 +1387,15 @@ class LiveChatAlertBot:
     ):
         self.channel = (channel or FAVORITE_CHANNEL).strip()
         self.keywords = list(keywords) if keywords is not None else list(KEYWORDS)
-        self.keyword_patterns = compile_keyword_patterns(self.keywords)
         self.api_keys = list(api_keys) if api_keys is not None else list(YOUTUBE_API_KEYS)
         self.api_manager = YouTubeApiManager(self.api_keys)
         self.idle_check_interval = idle_check_interval or IDLE_CHECK_INTERVAL_SECONDS
+
+        # Load persisted state if running with default configuration
+        if channel is None and keywords is None:
+            self._load_state()
+
+        self.keyword_patterns = compile_keyword_patterns(self.keywords)
 
         self.channel_id: Optional[str] = None
         self.direct_video_id: Optional[str] = None
@@ -1331,6 +1412,32 @@ class LiveChatAlertBot:
         self.last_alert_time: Optional[float] = None
         self.last_alert_details: Optional[Dict[str, str]] = None
         self.last_error: Optional[str] = None
+
+    def _load_state(self) -> None:
+        if _STATE_FILE.exists():
+            try:
+                with open(_STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                saved_channel = data.get("channel")
+                saved_keywords = data.get("keywords")
+                if saved_channel:
+                    self.channel = saved_channel
+                if saved_keywords and isinstance(saved_keywords, list):
+                    self.keywords = [k.strip() for k in saved_keywords if k.strip()]
+                log.info(f"Loaded persistent bot state: target='{self.channel}', keywords={self.keywords}")
+            except Exception as e:
+                log.warning(f"Could not load bot state file: {e}")
+
+    def _save_state(self) -> None:
+        try:
+            data = {
+                "channel": self.channel,
+                "keywords": self.keywords,
+            }
+            with open(_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            log.warning(f"Could not save bot state file: {e}")
 
     @property
     def is_running(self) -> bool:
@@ -1386,6 +1493,7 @@ class LiveChatAlertBot:
             self.direct_video_id = None
             self.current_video_id = None
             self.messages_scanned = 0
+            self._save_state()
 
         if was_running:
             self.start()
@@ -1400,7 +1508,10 @@ class LiveChatAlertBot:
         with self._lock:
             self.keywords = cleaned
             self.keyword_patterns = compile_keyword_patterns(self.keywords)
+            reset_anti_spam_cache()
+            self._save_state()
 
+        log.info(f"Keywords dynamically updated: {self.keywords}")
         return True, f"✅ Keywords updated ({len(cleaned)} keywords): {', '.join(cleaned)}"
 
     def _on_match(self, author: str, keyword: str, text: str, video_id: str) -> None:
@@ -1538,6 +1649,7 @@ class LiveChatAlertBot:
                             patterns=self.keyword_patterns,
                             on_match=self._on_match,
                             on_message=self._on_message,
+                            get_patterns=lambda: self.keyword_patterns,
                         )
                         self.current_video_id = None
                         self.state = "MONITORING"

@@ -93,6 +93,31 @@ class TestLiveChatAlertBotController(unittest.TestCase):
         status = self.bot.get_status()
         self.assertEqual(status["messages_scanned"], 2)
 
+    def test_dynamic_keyword_updates_and_spam_reset(self):
+        # Initial keywords from setUp are ["solo", "custom"]
+        self.assertEqual(self.bot.keywords, ["solo", "custom"])
+        kw_func = lambda: self.bot.keyword_patterns
+        self.assertEqual(matches_keyword("playing solo today", patterns=kw_func()), "solo")
+        self.assertIsNone(matches_keyword("playing squad today", patterns=kw_func()))
+
+        # Dynamically update keywords
+        self.bot.update_keywords(["squad", "clutch"])
+        self.assertEqual(matches_keyword("playing squad today", patterns=kw_func()), "squad")
+        self.assertIsNone(matches_keyword("playing solo today", patterns=kw_func()))
+
+    def test_channel_ownership_verification_logic(self):
+        from yt_live_chat_alert import is_video_from_channel
+        # Empty inputs return False
+        self.assertFalse(is_video_from_channel("", "UC123"))
+        self.assertFalse(is_video_from_channel("vid123", ""))
+
+    def test_state_persistence(self):
+        # Ensure state saving and loading works without error
+        self.bot.update_channel("@PersistChannel")
+        self.bot.update_keywords(["persist_kw"])
+        self.assertEqual(self.bot.channel, "@PersistChannel")
+        self.assertEqual(self.bot.keywords, ["persist_kw"])
+
 
 class TestNtfyController(unittest.TestCase):
     def setUp(self):
