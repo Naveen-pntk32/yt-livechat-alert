@@ -137,14 +137,11 @@ else:
         "NAVEEN-PNTk",
     ]
 
-# Anti-spam: Ignore duplicate messages or repeated keywords from the same user for this duration (seconds)
-USER_SPAM_COOLDOWN_SECONDS = int(os.environ.get("USER_SPAM_COOLDOWN_SECONDS", "60"))
-
-# Anti-spam: Ignore identical copy-paste spam messages across chat for this duration (seconds)
-DUPLICATE_MESSAGE_COOLDOWN_SECONDS = int(os.environ.get("DUPLICATE_MESSAGE_COOLDOWN_SECONDS", "60"))
-
-# Anti-spam alert debounce cooldown in seconds (per keyword across all users)
-ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "30"))
+# Anti-spam: Ignore exact duplicate messages for this duration (seconds)
+SPAM_COOLDOWN_SECONDS = int(os.environ.get("SPAM_COOLDOWN_SECONDS", os.environ.get("USER_SPAM_COOLDOWN_SECONDS", "30")))
+USER_SPAM_COOLDOWN_SECONDS = SPAM_COOLDOWN_SECONDS
+DUPLICATE_MESSAGE_COOLDOWN_SECONDS = SPAM_COOLDOWN_SECONDS
+ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "0"))
 
 # How often to check whether the channel has gone live while idle (seconds)
 IDLE_CHECK_INTERVAL_SECONDS = int(os.environ.get("IDLE_CHECK_INTERVAL_SECONDS", "30"))
@@ -605,16 +602,14 @@ def compile_keyword_patterns(keywords: List[str]) -> List[Tuple[str, re.Pattern]
 _KEYWORD_PATTERNS = compile_keyword_patterns(KEYWORDS)
 
 # Anti-spam deduplication tracking
-_user_keyword_timestamps: Dict[Tuple[str, str], float] = {}   # (author, keyword) -> timestamp
 _user_message_timestamps: Dict[Tuple[str, str], float] = {}   # (author, normalized_text) -> timestamp
 _global_message_timestamps: Dict[str, float] = {}             # normalized_text -> timestamp
-_last_alert_timestamps: Dict[str, float] = {}                 # keyword -> timestamp
 
 
 def _cleanup_anti_spam_cache(now: float, max_age: float = 300.0) -> None:
     """Purges expired anti-spam timestamps to keep memory usage minimal."""
     cutoff = now - max_age
-    for cache in (_user_keyword_timestamps, _user_message_timestamps, _global_message_timestamps):
+    for cache in (_user_message_timestamps, _global_message_timestamps):
         expired = [k for k, ts in cache.items() if ts < cutoff]
         for k in expired:
             del cache[k]
@@ -622,10 +617,8 @@ def _cleanup_anti_spam_cache(now: float, max_age: float = 300.0) -> None:
 
 def reset_anti_spam_cache() -> None:
     """Purges all anti-spam and cooldown timestamps so new keywords or messages trigger alerts immediately."""
-    _user_keyword_timestamps.clear()
     _user_message_timestamps.clear()
     _global_message_timestamps.clear()
-    _last_alert_timestamps.clear()
 
 
 def strip_emoji_placeholders(text: str) -> str:
@@ -649,50 +642,39 @@ def matches_keyword(text: str, patterns: Optional[List[Tuple[str, re.Pattern]]] 
 def should_send_alert(author: str, keyword: str, text: str) -> bool:
     """
     Evaluates anti-spam filters before dispatching alerts:
-    1. If anyone sends the exact same spam message text, ignores duplicates for 60s (1 min).
-    2. If the same user repeatedly sends messages or the same keyword, ignores duplicates for 60s (1 min).
-    3. Enforces ALERT_COOLDOWN_SECONDS per keyword across different users to prevent stream flood.
+    - If the same user repeats the exact same message within 30s (e.g. 'solo', 'solo', 'solo'), it blocks as spam.
+    - If the user sends different messages (e.g. 'solo', 'solo pola', 'solo va'), each unique message triggers an alert.
+    - If anyone sends the exact same spam text across chat, duplicate is ignored for 30s.
     """
     now = time.time()
     _cleanup_anti_spam_cache(now)
 
     author_key = author.strip().lower()
-    kw_key = keyword.strip().lower()
-    # Normalize message text by collapsing extra whitespace and lowering case
-    normalized_text = re.sub(r"\s+", " ", text.strip().lower())
 
-    # 1. Check if this exact message was already alerted recently (global duplicate text - 60s)
+    # Normalize message text by removing emojis, punctuation, collapsing whitespace and lowercasing
+    cleaned = strip_emoji_placeholders(text)
+    normalized = re.sub(r"[^\w\s]", "", cleaned.lower())
+    normalized_text = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized_text:
+        normalized_text = cleaned.strip().lower()
+
+    # 1. Check if this exact message was already alerted recently (global duplicate text - 30s)
     last_global_msg = _global_message_timestamps.get(normalized_text, 0.0)
-    if now - last_global_msg < DUPLICATE_MESSAGE_COOLDOWN_SECONDS:
-        remaining = int(DUPLICATE_MESSAGE_COOLDOWN_SECONDS - (now - last_global_msg))
-        log.info(f"SPAM FILTER: Ignored duplicate chat spam from '{author}' ({remaining}s cooldown remaining).")
+    if now - last_global_msg < SPAM_COOLDOWN_SECONDS:
+        remaining = int(SPAM_COOLDOWN_SECONDS - (now - last_global_msg))
+        log.info(f"SPAM FILTER: Ignored duplicate chat spam '{normalized_text}' from '{author}' ({remaining}s cooldown remaining).")
         return False
 
-    # 2. Check if this user already sent this exact message within the 60s window
+    # 2. Check if this user already sent this exact message within the 30s window
     last_user_msg = _user_message_timestamps.get((author_key, normalized_text), 0.0)
-    if now - last_user_msg < USER_SPAM_COOLDOWN_SECONDS:
-        remaining = int(USER_SPAM_COOLDOWN_SECONDS - (now - last_user_msg))
-        log.info(f"SPAM FILTER: Ignored duplicate message from '{author}' ({remaining}s cooldown remaining).")
+    if now - last_user_msg < SPAM_COOLDOWN_SECONDS:
+        remaining = int(SPAM_COOLDOWN_SECONDS - (now - last_user_msg))
+        log.info(f"SPAM FILTER: Ignored repeated message '{normalized_text}' from '{author}' ({remaining}s cooldown remaining).")
         return False
 
-    # 3. Check if this user already triggered this keyword within the 60s window
-    last_user_kw = _user_keyword_timestamps.get((author_key, kw_key), 0.0)
-    if now - last_user_kw < USER_SPAM_COOLDOWN_SECONDS:
-        remaining = int(USER_SPAM_COOLDOWN_SECONDS - (now - last_user_kw))
-        log.info(f"SPAM FILTER: Ignored repeated keyword '{keyword}' from '{author}' ({remaining}s cooldown remaining).")
-        return False
-
-    # 4. Check global keyword cooldown (across different users)
-    last_kw_time = _last_alert_timestamps.get(kw_key, 0.0)
-    if now - last_kw_time < ALERT_COOLDOWN_SECONDS:
-        log.debug(f"Keyword '{keyword}' debounced ({ALERT_COOLDOWN_SECONDS}s global cooldown active).")
-        return False
-
-    # Passed all filters: record timestamps and allow alert
+    # Passed filters: record timestamps and allow alert
     _global_message_timestamps[normalized_text] = now
     _user_message_timestamps[(author_key, normalized_text)] = now
-    _user_keyword_timestamps[(author_key, kw_key)] = now
-    _last_alert_timestamps[kw_key] = now
     return True
 
 

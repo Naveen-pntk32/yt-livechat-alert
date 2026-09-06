@@ -126,6 +126,30 @@ class TestLiveChatAlertBotController(unittest.TestCase):
         self.assertEqual(format_author(""), "@Anonymous")
         self.assertEqual(format_author(None), "@Anonymous")
 
+    def test_spam_detection_allows_different_messages_and_blocks_repeated(self):
+        from yt_live_chat_alert import should_send_alert, reset_anti_spam_cache
+        reset_anti_spam_cache()
+
+        # 1. User sends 'solo' -> allowed
+        self.assertTrue(should_send_alert("User1", "solo", "solo"))
+
+        # 2. Same user sends 'solo' again immediately -> blocked as duplicate spam
+        self.assertFalse(should_send_alert("User1", "solo", "solo"))
+        self.assertFalse(should_send_alert("User1", "solo", "solo!"))
+
+        # 3. Same user sends 'solo pola' -> allowed (different message)
+        self.assertTrue(should_send_alert("User1", "solo", "solo pola"))
+
+        # 4. Same user sends 'solo va' -> allowed (different message)
+        self.assertTrue(should_send_alert("User1", "solo", "solo va"))
+
+        # 5. Same user repeats 'solo va' -> blocked as duplicate spam
+        self.assertFalse(should_send_alert("User1", "solo", "solo va"))
+
+        # Reset cache test
+        reset_anti_spam_cache()
+        self.assertTrue(should_send_alert("User1", "solo", "solo"))
+
 
 class TestNtfyController(unittest.TestCase):
     def setUp(self):
