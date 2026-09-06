@@ -80,8 +80,10 @@ Keep your YouTube Live Chat Alert Bot running 24/7 in the cloud—**completely f
 6. Scroll down to **Environment Variables** and add:
    | Key | Value | Description |
    |---|---|---|
-   | `NTFY_TOPIC` | `yt-live-alert-naveen-77` | Your ntfy topic name |
-   | `YT_CHANNEL` | `@YourStreamerHandle` | Target YouTube channel |
+   | `NTFY_TOPIC` | `yt-alert-naveen` | Your ntfy topic name |
+   | `NTFY_SERVER` | `https://ntfy.adminforge.de` | Your ntfy server (or default `https://ntfy.sh`) |
+   | `YT_CHANNEL` | `@YourStreamerHandle` | Target channel ID, @handle, or live video URL |
+   | `YOUTUBE_API_KEY` | `AIzaSy...` | *(Recommended)* Guaranteed 100% live stream detection fallback |
    | `KEYWORDS` | `solo, 1v1, ff, free fire` | Keywords to detect |
    | `AUTO_START_BOT` | `false` | Set to `false` so it waits for your `init` message! |
 7. Click **Create Web Service**.
@@ -114,7 +116,7 @@ Open the **ntfy** app on your phone, open your topic, tap the **Send / Pen icon*
 | **`init`** or **`start`** | `/start` | **Triggers and starts chat monitoring** | 🟢 *Bot started! Monitoring channel: @Streamer* |
 | **`status`** | `/status` | Checks bot state, stream live status & uptime | 📊 *Bot Status Report (State, Channel, Matches)* |
 | **`stop`** | `/stop` | Pauses chat monitoring | 🛑 *Bot stopped successfully.* |
-| **`channel @NewStreamer`** | `/channel @NewStreamer` | Switches target channel dynamically | ✅ *Target channel updated to: @NewStreamer* |
+| **`channel @Streamer`** | `/channel @Streamer` | Switches target channel or direct live link (`https://youtu.be/...`) | ✅ *Target channel updated* |
 | **`keywords solo, 1v1`** | `/keywords solo, 1v1` | Updates watched keywords on the fly | ✅ *Keywords updated: solo, 1v1* |
 | **`help`** | `/help` | Shows command list | 🤖 *Command Guide / Interactive Buttons* |
 

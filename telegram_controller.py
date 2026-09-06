@@ -122,8 +122,11 @@ class TelegramController:
             if not args:
                 curr = self.bot.channel or "None configured"
                 return (
-                    f"📺 *Current Monitored Channel:* `{curr}`\n\n"
-                    f"To switch channels, type:\n`/channel @StreamerHandle` or\n`/channel https://youtube.com/@Streamer`"
+                    f"📺 *Current Monitored Target:* `{curr}`\n\n"
+                    "To switch targets, send:\n"
+                    "• `/channel @StreamerHandle`\n"
+                    "• `/channel UC...`\n"
+                    "• `/channel https://youtu.be/<live_video_id>`"
                 )
             success, msg = self.bot.update_channel(args)
             return msg
@@ -144,10 +147,10 @@ class TelegramController:
         elif cmd in ("/help", "help", "/menu", "menu"):
             return (
                 "🤖 *YouTube Live Chat Alert Bot - Controls*\n\n"
-                "• `/status` - Check if bot is running, streamer is live & uptime\n"
+                "• `/status` - Check if bot is running, streamer is live, chat stats & uptime\n"
                 "• `/start` - Start monitoring YouTube live stream\n"
                 "• `/stop` - Pause / stop monitoring\n"
-                "• `/channel <@handle>` - Switch target channel dynamically\n"
+                "• `/channel <@handle or link>` - Switch target channel or live video link\n"
                 "• `/keywords <k1, k2>` - Update watched keywords\n"
                 "• `/help` - Show this menu"
             )

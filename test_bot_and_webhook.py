@@ -19,7 +19,12 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from yt_live_chat_alert import LiveChatAlertBot, compile_keyword_patterns, matches_keyword
+from yt_live_chat_alert import (
+    LiveChatAlertBot,
+    compile_keyword_patterns,
+    matches_keyword,
+    extract_video_id,
+)
 from ntfy_controller import NtfyController
 from main import app
 
@@ -70,6 +75,23 @@ class TestLiveChatAlertBotController(unittest.TestCase):
         text = self.bot.get_status_text()
         self.assertIn("YouTube Alert Bot", text)
         self.assertIn("@TestChannel", text)
+
+    def test_direct_video_id_extraction(self):
+        self.assertEqual(extract_video_id("https://www.youtube.com/watch?v=O-ZJ1TZtXAU"), "O-ZJ1TZtXAU")
+        self.assertEqual(extract_video_id("https://youtu.be/O-ZJ1TZtXAU"), "O-ZJ1TZtXAU")
+        self.assertEqual(extract_video_id("https://www.youtube.com/live/O-ZJ1TZtXAU"), "O-ZJ1TZtXAU")
+        self.assertEqual(extract_video_id("O-ZJ1TZtXAU"), "O-ZJ1TZtXAU")
+        self.assertIsNone(extract_video_id("UCmyKnNRH0wH-r8I-ceP-dsg"))
+        self.assertIsNone(extract_video_id("@Streamer"))
+
+    def test_message_scanned_tracking(self):
+        self.assertEqual(self.bot.messages_scanned, 0)
+        self.bot._on_message("UserA", "Hello world")
+        self.assertEqual(self.bot.messages_scanned, 1)
+        self.bot._on_message("UserB", "Another message")
+        self.assertEqual(self.bot.messages_scanned, 2)
+        status = self.bot.get_status()
+        self.assertEqual(status["messages_scanned"], 2)
 
 
 class TestNtfyController(unittest.TestCase):

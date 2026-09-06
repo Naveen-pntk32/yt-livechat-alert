@@ -146,7 +146,7 @@ DUPLICATE_MESSAGE_COOLDOWN_SECONDS = int(os.environ.get("DUPLICATE_MESSAGE_COOLD
 ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "30"))
 
 # How often to check whether the channel has gone live while idle (seconds)
-IDLE_CHECK_INTERVAL_SECONDS = int(os.environ.get("IDLE_CHECK_INTERVAL_SECONDS", "180"))
+IDLE_CHECK_INTERVAL_SECONDS = int(os.environ.get("IDLE_CHECK_INTERVAL_SECONDS", "30"))
 
 # If all YouTube API quotas get exceeded, wait this long before retrying
 QUOTA_BACKOFF_SECONDS = int(os.environ.get("QUOTA_BACKOFF_SECONDS", "3600"))
@@ -238,15 +238,74 @@ _WEB_HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
+    "Cookie": "SOCS=CAESEwgDEgk2OTg5Nzg0MzEaAmVuIAEaBgiA_LyaBg; CONSENT=PENDING+999",
 }
+
+
+def extract_video_id(url_or_id: str) -> Optional[str]:
+    """
+    Extracts an 11-character YouTube video ID if the input is a video link or bare ID.
+    Supports:
+      - https://www.youtube.com/watch?v=VIDEO_ID
+      - https://youtu.be/VIDEO_ID
+      - https://www.youtube.com/live/VIDEO_ID
+      - Bare 11-character alphanumeric video ID
+    """
+    s = url_or_id.strip()
+    if not s or s.startswith("UC") or s.startswith("@"):
+        return None
+
+    if len(s) == 11 and re.match(r"^[a-zA-Z0-9_-]{11}$", s):
+        return s
+
+    m = re.search(r"youtu\.be/([a-zA-Z0-9_-]{11})", s)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"youtube\.com/(?:watch\?.*?v=|live/)([a-zA-Z0-9_-]{11})", s)
+    if m:
+        return m.group(1)
+
+    return None
 
 
 def resolve_channel_id(api_manager: YouTubeApiManager, channel_input: str) -> str:
     """
-    Accepts a channel ID, @handle, or full channel URL, and returns
-    the canonical channel ID (UC...).
+    Accepts a channel ID, @handle, full channel URL, or direct video URL/ID,
+    and returns the canonical channel ID (UC...).
     """
     channel_input = channel_input.strip()
+
+    # Case 0: Direct video link or ID provided
+    vid = extract_video_id(channel_input)
+    if vid:
+        try:
+            resp = requests.get(f"https://www.youtube.com/watch?v={vid}", headers=_WEB_HEADERS, timeout=10)
+            if resp.ok:
+                m = re.search(r'itemprop="channelId"\s+content="(UC[\w-]{22})"', resp.text)
+                if not m:
+                    m = re.search(r'"channelId":"(UC[\w-]{22})"', resp.text)
+                if m:
+                    cid = m.group(1)
+                    log.info(f"Resolved video {vid} -> channel {cid} (via web lookup)")
+                    return cid
+        except Exception:
+            pass
+
+        service = api_manager.get_service()
+        if service:
+            try:
+                res = service.videos().list(part="snippet", id=vid).execute()
+                items = res.get("items", [])
+                if items:
+                    cid = items[0]["snippet"].get("channelId")
+                    if cid:
+                        log.info(f"Resolved video {vid} -> channel {cid} (via API)")
+                        return cid
+            except Exception:
+                pass
+
+        return vid
 
     # Case 1: Already a standard channel ID
     if channel_input.startswith("UC") and len(channel_input) == 24:
@@ -303,65 +362,152 @@ def resolve_channel_id(api_manager: YouTubeApiManager, channel_input: str) -> st
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LIVE STREAM DETECTION (Zero Quota)
+# LIVE STREAM DETECTION (Multi-Tier Zero-Quota + Official API Fallback)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def is_video_actually_live(video_id: str) -> bool:
+def is_video_actually_live(video_id: str, api_manager: Optional[YouTubeApiManager] = None) -> bool:
     """
-    Zero-quota check to verify if a candidate video is ACTUALLY live right now.
+    Verifies if a candidate video is ACTUALLY live right now.
     Prevents false triggers on past recorded streams or offline channel pages.
     """
     try:
+        # Check 1: Live chat page continuation
         chat_url = f"https://www.youtube.com/live_chat?v={video_id}"
         resp = requests.get(chat_url, headers=_WEB_HEADERS, timeout=10)
-        # An active live stream will have continuation tokens in the live chat page
         if '"continuation":"' in resp.text and '"INNERTUBE_API_KEY":"' in resp.text:
             return True
 
-        # Secondary check on watch page for isLiveNow flag
+        # Check 2: Watch page for live markers
         watch_url = f"https://www.youtube.com/watch?v={video_id}"
         w_resp = requests.get(watch_url, headers=_WEB_HEADERS, timeout=10)
-        m = re.search(r'"isLiveNow":\s*(true|false)', w_resp.text)
-        if m and m.group(1) == "true":
+        if re.search(r'"isLiveNow":\s*true', w_resp.text):
             return True
-
-        return False
+        if re.search(r'"isLive":\s*true', w_resp.text):
+            return True
+        if '<meta itemprop="isLiveBroadcast" content="True">' in w_resp.text:
+            return True
+        if '"BADGE_STYLE_TYPE_LIVE_NOW"' in w_resp.text:
+            return True
     except Exception as e:
-        log.debug(f"Error checking live status for {video_id}: {e}")
-        return False
+        log.debug(f"Web live check error for {video_id}: {e}")
+
+    # Check 3: Official API fallback if available
+    if api_manager and api_manager.has_keys:
+        try:
+            status, _ = get_stream_status_api(api_manager, video_id)
+            if status == "live":
+                return True
+        except Exception:
+            pass
+
+    return False
 
 
-def find_candidate_video_id(channel_id: str) -> Optional[str]:
+def find_live_video_id_api(api_manager: YouTubeApiManager, channel_id: str) -> Optional[str]:
     """
-    Zero-quota live check. YouTube's public /channel/UC.../live URL
-    redirects to the current live stream if one is active.
-    Returns the video_id ONLY if it is confirmed to be live right now.
+    Official API search for active live broadcast on the channel.
+    Returns video_id or None.
     """
-    url = f"https://www.youtube.com/channel/{channel_id}/live"
-
-    try:
-        response = requests.get(
-            url,
-            headers=_WEB_HEADERS,
-            timeout=10,
-            allow_redirects=True,
-        )
-    except requests.RequestException as error:
-        log.warning(f"Could not reach channel live page: {error}")
+    service = api_manager.get_service()
+    if not service:
         return None
+    try:
+        response = service.search().list(
+            part="id",
+            channelId=channel_id,
+            eventType="live",
+            type="video",
+            maxResults=1,
+        ).execute()
+        items = response.get("items", [])
+        if items:
+            vid = items[0]["id"]["videoId"]
+            log.info(f"Official API identified active live broadcast: {vid}")
+            return vid
+    except Exception as e:
+        if is_quota_exceeded_error(e):
+            log.warning("YouTube API quota exceeded during live search. Rotating key...")
+            api_manager.rotate_key()
+        else:
+            log.warning(f"YouTube API live stream search error: {e}")
+    return None
 
-    # Check redirected URL query param ?v=VIDEO_ID
-    query = parse_qs(urlparse(response.url).query)
-    video_id = query.get("v", [None])[0]
 
-    # Fallback: Check inline page JSON for live videoId
-    if not video_id:
-        match = re.search(r'"videoId":"([a-zA-Z0-9_-]{11})"', response.text)
-        if match:
-            video_id = match.group(1)
+def find_candidate_video_id(
+    channel_id: str,
+    api_manager: Optional[YouTubeApiManager] = None,
+) -> Optional[str]:
+    """
+    Multi-tier live stream detector:
+    1. Zero-quota web check on /channel/UC.../live (redirect and inline JSON)
+    2. Zero-quota web check on /channel/UC.../streams
+    3. Official YouTube Data API fallback (100% reliable)
+    """
+    candidate_ids = []
 
-    if video_id and is_video_actually_live(video_id):
-        return video_id
+    # Strategy 1: Check /channel/UC.../live
+    live_url = f"https://www.youtube.com/channel/{channel_id}/live"
+    try:
+        resp = requests.get(live_url, headers=_WEB_HEADERS, timeout=10, allow_redirects=True)
+        if resp.ok and "consent.youtube.com" not in resp.url:
+            query = parse_qs(urlparse(resp.url).query)
+            redirected_v = query.get("v", [None])[0]
+            if redirected_v and redirected_v not in candidate_ids:
+                candidate_ids.append(redirected_v)
+
+            # Extract videoIds from liveStreamability
+            streamability = re.findall(r'"liveStreamability"[^}]+?"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
+            for vid in streamability:
+                if vid not in candidate_ids:
+                    candidate_ids.append(vid)
+
+            # Extract videoIds from watchEndpoint
+            watch_endpoints = re.findall(r'"watchEndpoint":\s*\{\s*"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
+            for vid in watch_endpoints:
+                if vid not in candidate_ids:
+                    candidate_ids.append(vid)
+
+            # Extract candidate videoIds from inline JSON
+            for m in re.finditer(r'"videoId":"([a-zA-Z0-9_-]{11})"', resp.text):
+                vid = m.group(1)
+                if vid not in candidate_ids:
+                    candidate_ids.append(vid)
+                if len(candidate_ids) >= 15:
+                    break
+    except Exception as e:
+        log.debug(f"Web /live lookup error for channel {channel_id}: {e}")
+
+    for vid in candidate_ids:
+        if is_video_actually_live(vid, api_manager=api_manager):
+            log.info(f"Found active live stream via /live scrape: {vid}")
+            return vid
+
+    # Strategy 2: Check /channel/UC.../streams
+    streams_url = f"https://www.youtube.com/channel/{channel_id}/streams"
+    streams_candidates = []
+    try:
+        resp = requests.get(streams_url, headers=_WEB_HEADERS, timeout=10, allow_redirects=True)
+        if resp.ok and "consent.youtube.com" not in resp.url:
+            for m in re.finditer(r'"videoId":"([a-zA-Z0-9_-]{11})"', resp.text):
+                vid = m.group(1)
+                if vid not in candidate_ids and vid not in streams_candidates:
+                    streams_candidates.append(vid)
+                if len(streams_candidates) >= 10:
+                    break
+    except Exception as e:
+        log.debug(f"Web /streams lookup error for channel {channel_id}: {e}")
+
+    for vid in streams_candidates:
+        if is_video_actually_live(vid, api_manager=api_manager):
+            log.info(f"Found active live stream via /streams scrape: {vid}")
+            return vid
+
+    # Strategy 3: Official YouTube Data API fallback
+    if api_manager and api_manager.has_keys:
+        api_vid = find_live_video_id_api(api_manager, channel_id)
+        if api_vid:
+            log.info(f"Found active live stream via Official API fallback: {api_vid}")
+            return api_vid
 
     return None
 
@@ -815,6 +961,7 @@ def watch_chat_innertube(
     stop_event: Optional[threading.Event] = None,
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
+    on_message: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
     """
     Streams YouTube live chat in real time directly through YouTube's web
@@ -893,6 +1040,11 @@ def watch_chat_innertube(
                     raw_text = "".join(r.get("text", "") for r in runs)
 
                     if raw_text:
+                        if on_message:
+                            try:
+                                on_message(author, raw_text)
+                            except Exception:
+                                pass
                         cleaned_text = strip_emoji_placeholders(raw_text)
                         matched_kw = matches_keyword(cleaned_text, patterns=patterns)
                         if matched_kw:
@@ -934,6 +1086,7 @@ def watch_chat_chatdownloader(
     stop_event: Optional[threading.Event] = None,
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
+    on_message: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
     """Secondary 0-quota fallback using chat-downloader."""
     if not CHAT_DOWNLOADER_AVAILABLE:
@@ -955,6 +1108,12 @@ def watch_chat_chatdownloader(
             raw_text = message.get("message", "")
             if not raw_text:
                 continue
+
+            if on_message:
+                try:
+                    on_message(author, raw_text)
+                except Exception:
+                    pass
 
             cleaned_text = strip_emoji_placeholders(raw_text)
             matched_kw = matches_keyword(cleaned_text, patterns=patterns)
@@ -979,6 +1138,7 @@ def watch_chat_api(
     stop_event: Optional[threading.Event] = None,
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
+    on_message: Optional[Callable[[str, str], None]] = None,
 ) -> None:
     """
     Monitors live chat using the official YouTube Data API.
@@ -1050,6 +1210,12 @@ def watch_chat_api(
             except KeyError:
                 continue
 
+            if on_message:
+                try:
+                    on_message(author, raw_text)
+                except Exception:
+                    pass
+
             cleaned_text = strip_emoji_placeholders(raw_text)
             matched_kw = matches_keyword(cleaned_text, patterns=patterns)
 
@@ -1077,19 +1243,20 @@ def watch_chat_hybrid(
     stop_event: Optional[threading.Event] = None,
     patterns: Optional[List[Tuple[str, re.Pattern]]] = None,
     on_match: Optional[Callable[[str, str, str, str], None]] = None,
+    on_message: Optional[Callable[[str, str], None]] = None,
 ) -> None:
     """
     Executes primary 0-quota Innertube engine -> chat-downloader -> Official API fallback.
     """
     # Tier 1: Primary Native Innertube (0 Quota)
-    if watch_chat_innertube(video_id, stop_event=stop_event, patterns=patterns, on_match=on_match):
+    if watch_chat_innertube(video_id, stop_event=stop_event, patterns=patterns, on_match=on_match, on_message=on_message):
         return
 
     if stop_event and stop_event.is_set():
         return
 
     # Tier 2: chat-downloader (0 Quota)
-    if watch_chat_chatdownloader(video_id, stop_event=stop_event, patterns=patterns, on_match=on_match):
+    if watch_chat_chatdownloader(video_id, stop_event=stop_event, patterns=patterns, on_match=on_match, on_message=on_message):
         return
 
     if stop_event and stop_event.is_set():
@@ -1104,7 +1271,15 @@ def watch_chat_hybrid(
                 log.info("Stream does not appear to have an active live chat via API.")
                 return
 
-        watch_chat_api(api_manager, live_chat_id, video_id, stop_event=stop_event, patterns=patterns, on_match=on_match)
+        watch_chat_api(
+            api_manager,
+            live_chat_id,
+            video_id,
+            stop_event=stop_event,
+            patterns=patterns,
+            on_match=on_match,
+            on_message=on_message,
+        )
     else:
         log.warning(
             "Scrapers failed and no YOUTUBE_API_KEY is configured for API fallback. "
@@ -1142,6 +1317,7 @@ class LiveChatAlertBot:
         self.idle_check_interval = idle_check_interval or IDLE_CHECK_INTERVAL_SECONDS
 
         self.channel_id: Optional[str] = None
+        self.direct_video_id: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -1149,6 +1325,7 @@ class LiveChatAlertBot:
         self.state = "STOPPED"  # STOPPED, STARTING, RESOLVING, MONITORING, LIVE_STREAMING, ERROR
         self.current_video_id: Optional[str] = None
         self.total_matches = 0
+        self.messages_scanned = 0
         self.start_time: Optional[float] = None
         self.last_check_time: Optional[float] = None
         self.last_alert_time: Optional[float] = None
@@ -1206,7 +1383,9 @@ class LiveChatAlertBot:
         with self._lock:
             self.channel = new_channel
             self.channel_id = None
+            self.direct_video_id = None
             self.current_video_id = None
+            self.messages_scanned = 0
 
         if was_running:
             self.start()
@@ -1235,6 +1414,10 @@ class LiveChatAlertBot:
                 "video_id": video_id,
             }
 
+    def _on_message(self, author: str, text: str) -> None:
+        with self._lock:
+            self.messages_scanned += 1
+
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             uptime_seconds = int(time.time() - self.start_time) if (self.is_running and self.start_time) else 0
@@ -1249,11 +1432,13 @@ class LiveChatAlertBot:
                 "is_running": self.is_running,
                 "target_channel": self.channel,
                 "resolved_channel_id": self.channel_id,
+                "direct_video_id": self.direct_video_id,
                 "current_video_id": self.current_video_id,
                 "is_stream_live": bool(self.current_video_id),
                 "stream_url": f"https://youtu.be/{self.current_video_id}" if self.current_video_id else None,
                 "keywords": list(self.keywords),
                 "total_matches": self.total_matches,
+                "messages_scanned": self.messages_scanned,
                 "uptime": uptime_str,
                 "last_check_time": self.last_check_time,
                 "last_alert_time": self.last_alert_time,
@@ -1268,14 +1453,17 @@ class LiveChatAlertBot:
 
         lines = [
             f"{state_emoji} *YouTube Alert Bot: {s['state']}*",
-            f"• *Channel:* {s['target_channel'] or 'None'}",
+            f"• *Target:* {s['target_channel'] or 'None'}",
             f"• *Stream Status:* {live_emoji}",
         ]
         if s["is_stream_live"]:
             lines.append(f"• *Live Stream:* {s['stream_url']}")
+            lines.append(f"• *Chat Scanned:* {s['messages_scanned']} messages ({s['total_matches']} alerts)")
+        else:
+            lines.append(f"• *Total Matches:* {s['total_matches']}")
+
         lines.extend([
             f"• *Keywords ({len(s['keywords'])}):* {', '.join(s['keywords'][:6])}{'...' if len(s['keywords']) > 6 else ''}",
-            f"• *Total Matches:* {s['total_matches']}",
             f"• *Uptime:* {s['uptime']}",
         ])
         if s.get("last_alert_details"):
@@ -1286,18 +1474,23 @@ class LiveChatAlertBot:
         return "\n".join(lines)
 
     def _worker_loop(self) -> None:
-        log.info(f"Bot worker started for channel: {self.channel}")
+        log.info(f"Bot worker started for target: {self.channel}")
         last_notified_video_id = None
 
         while not self._stop_event.is_set():
-            # Step 1: Ensure channel ID is resolved
-            if not self.channel_id:
+            # Step 1: Ensure channel ID or direct video ID is resolved
+            if not self.channel_id and not self.direct_video_id:
                 try:
                     self.state = "RESOLVING"
-                    self.channel_id = resolve_channel_id(self.api_manager, self.channel)
-                    log.info(f"Resolved channel ID: {self.channel_id}")
+                    vid = extract_video_id(self.channel)
+                    if vid:
+                        self.direct_video_id = vid
+                        log.info(f"Target identified as direct video ID: {vid}")
+                    else:
+                        self.channel_id = resolve_channel_id(self.api_manager, self.channel)
+                        log.info(f"Resolved channel ID: {self.channel_id}")
                 except Exception as e:
-                    self.last_error = f"Failed to resolve channel '{self.channel}': {e}"
+                    self.last_error = f"Failed to resolve target '{self.channel}': {e}"
                     log.error(self.last_error)
                     self.state = "ERROR"
                     if self._stop_event.wait(self.idle_check_interval):
@@ -1308,7 +1501,13 @@ class LiveChatAlertBot:
             self.last_check_time = time.time()
 
             try:
-                candidate_id = find_candidate_video_id(self.channel_id)
+                candidate_id = None
+                if self.direct_video_id:
+                    if is_video_actually_live(self.direct_video_id, self.api_manager):
+                        candidate_id = self.direct_video_id
+                elif self.channel_id:
+                    candidate_id = find_candidate_video_id(self.channel_id, self.api_manager)
+
                 if candidate_id:
                     is_live = True
                     live_chat_id = None
@@ -1330,7 +1529,7 @@ class LiveChatAlertBot:
                             dispatch_live_alerts(candidate_id)
                             last_notified_video_id = candidate_id
 
-                        log.info(f"Stream is LIVE ({candidate_id}). Monitoring chat...")
+                        log.info(f"Stream is LIVE ({candidate_id}). Monitoring chat in real time...")
                         watch_chat_hybrid(
                             self.api_manager,
                             candidate_id,
@@ -1338,6 +1537,7 @@ class LiveChatAlertBot:
                             stop_event=self._stop_event,
                             patterns=self.keyword_patterns,
                             on_match=self._on_match,
+                            on_message=self._on_message,
                         )
                         self.current_video_id = None
                         self.state = "MONITORING"

@@ -17,3 +17,10 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: NTFY_SERVER
+        sync: false
+      - key: IDLE_CHECK_INTERVAL_SECONDS
+        value: "30"
+

@@ -192,9 +192,17 @@ class NtfyController:
         elif command in ("channel", "setchannel", "target", "streamer"):
             if not args:
                 curr = self.bot.channel or "None configured"
-                return f"Current channel: {curr}\nTo change: channel @Streamer", "📺 Target Channel", 3
+                return (
+                    f"Current target: {curr}\n\n"
+                    "To change, send:\n"
+                    "• channel @Streamer\n"
+                    "• channel UC...\n"
+                    "• channel https://youtu.be/<stream_id>",
+                    "📺 Target Stream / Channel",
+                    3,
+                )
             success, msg = self.bot.update_channel(args)
-            return msg, "✅ Channel Updated", 3
+            return msg, "✅ Target Updated", 3
 
         elif command in ("keywords", "setkeywords", "kw"):
             if not args:
@@ -211,9 +219,9 @@ class NtfyController:
                 "YouTube Alert Bot Commands:\n\n"
                 "• init / start - Trigger & start chat monitoring\n"
                 "• stop - Pause chat monitoring\n"
-                "• status - View bot status, channel & live state\n"
-                "• channel <@handle> - Change target streamer\n"
-                "• keywords <k1, k2> - Update keywords\n"
+                "• status - View bot state, live status, chat stats & uptime\n"
+                "• channel <@handle or link> - Set streamer channel or live video link\n"
+                "• keywords <k1, k2> - Update keywords (e.g. keywords solo, 1v1)\n"
                 "• help - Show this command guide"
             )
             return help_msg, "🤖 Command Guide", 3
@@ -225,7 +233,7 @@ class NtfyController:
                 "• init / start - Start monitoring\n"
                 "• status - Check current status\n"
                 "• stop - Pause monitoring\n"
-                "• channel <@handle> - Change target\n"
+                "• channel <@handle or link> - Change target\n"
                 "• keywords <k1, k2> - Update keywords\n"
                 "• help - View command guide",
                 "🤖 Unknown Command",
