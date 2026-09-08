@@ -64,53 +64,59 @@ class NtfyController:
         title: str = "YouTube Alert Bot",
         priority: int = 3,
         tags: Optional[List[str]] = None,
+        click: Optional[str] = None,
     ) -> bool:
         """Publish a response notification back to the ntfy topic (with Telegram backup)."""
         if not self.topic:
             return False
 
         tags_list = tags or ["robot", "gear"]
-        topic_url = f"{self.server_url}/{self.topic}"
-        headers = {
-            "Title": title,
-            "Priority": str(priority),
-            "Tags": ",".join(tags_list),
-        }
-
         auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip()
-        if auth_token:
-            headers["Authorization"] = f"Bearer {auth_token}"
-
         published = False
 
-        # 1. Primary: Direct topic publish (standard ntfy endpoint)
+        # 1. Primary: Root JSON publish (safe for all Unicode/emojis, supported by ntfy)
         try:
-            resp = requests.post(topic_url, data=message.encode("utf-8"), headers=headers, timeout=10)
-            log.info(f"Published direct response to ntfy '{self.topic}': status={resp.status_code}")
+            json_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+            payload = {
+                "topic": self.topic,
+                "title": title,
+                "message": message,
+                "priority": priority,
+                "tags": tags_list,
+            }
+            if click:
+                payload["click"] = click
+            resp = requests.post(self.server_url, json=payload, headers=json_headers, timeout=10)
+            log.info(f"Published response via root JSON to ntfy '{self.topic}': status={resp.status_code}")
             if resp.ok:
                 published = True
-            elif resp.status_code == 429:
-                log.warning(f"ntfy.sh rate-limited (HTTP 429): {resp.text}")
         except Exception as e:
-            log.error(f"Failed direct publish to ntfy topic {self.topic}: {e}")
+            log.warning(f"Root JSON publish failed: {e}. Trying direct topic publish fallback...")
 
-        # 2. Fallback: Root JSON publish if direct publish failed
+        # 2. Fallback: Direct topic publish with clean ASCII headers (prevents latin-1 UnicodeEncodeError)
         if not published:
             try:
-                json_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
-                payload = {
-                    "topic": self.topic,
-                    "title": title,
-                    "message": message,
-                    "priority": priority,
-                    "tags": tags_list,
+                topic_url = f"{self.server_url}/{self.topic}"
+                # Clean title to ASCII for safe HTTP header transit
+                clean_title = title.encode("ascii", "ignore").decode("ascii").strip() or "YouTube Alert Bot"
+                headers = {
+                    "Title": clean_title,
+                    "Priority": str(priority),
+                    "Tags": ",".join(tags_list),
                 }
-                resp = requests.post(self.server_url, json=payload, headers=json_headers, timeout=10)
-                log.info(f"Published response via root JSON to ntfy: status={resp.status_code}")
+                if click:
+                    headers["Click"] = click
+                if auth_token:
+                    headers["Authorization"] = f"Bearer {auth_token}"
+
+                resp = requests.post(topic_url, data=message.encode("utf-8"), headers=headers, timeout=10)
+                log.info(f"Published direct response to ntfy '{self.topic}': status={resp.status_code}")
                 if resp.ok:
                     published = True
+                elif resp.status_code == 429:
+                    log.warning(f"ntfy rate-limited (HTTP 429): {resp.text}")
             except Exception as e:
-                log.error(f"Fallback root publish failed: {e}")
+                log.error(f"Failed direct fallback publish to ntfy topic {self.topic}: {e}")
 
         # 3. Mirror confirmation to Telegram if configured
         tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -118,6 +124,7 @@ class NtfyController:
         if tg_token and tg_chat_id:
             try:
                 tg_url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+                # Strip markdown asterisks for title line to avoid entity parse issues
                 requests.post(
                     tg_url,
                     json={
@@ -145,9 +152,13 @@ class NtfyController:
             "Bot Status",
             "Bot Stopped",
             "Channel Updated",
+            "Target Updated",
             "Keywords Updated",
             "Command Guide",
             "Unknown Command",
+            "Target Stream / Channel",
+            "Watched Keywords",
+            "Keywords Error",
         )
         if any(marker in title for marker in bot_titles):
             return True
@@ -170,6 +181,10 @@ class NtfyController:
         text = raw_text.strip()
         if not text:
             return None
+
+        # Allow commands prefixed with slash (e.g. /start, /status from Telegram habits)
+        if text.startswith("/"):
+            text = text[1:].strip()
 
         parts = text.split(maxsplit=1)
         command = parts[0].lower()
@@ -241,17 +256,21 @@ class NtfyController:
             )
 
     def _stream_loop(self) -> None:
-        """Continuous stream subscriber to ntfy.sh JSON endpoint."""
-        log.info(f"Connecting to ntfy stream listener for topic: {self.topic}")
+        """Continuous stream subscriber to ntfy JSON endpoint with auto-reconnect."""
+        log.info(f"Connecting to ntfy stream listener for topic: '{self.topic}' on {self.server_url}")
         stream_url = f"{self.server_url}/{self.topic}/json"
         last_id = None
+        last_timestamp = int(time.time()) - 5
         seen_ids = set()
 
         while not self._stop_event.is_set():
             try:
-                # Do NOT send since=now (causes HTTP 400). Track last_id across reconnects.
-                params = {"since": last_id} if last_id else None
-                resp = requests.get(stream_url, params=params, stream=True, timeout=(15, None))
+                # Use last_id if available, otherwise catch up from last_timestamp (seconds)
+                params = {"since": last_id} if last_id else {"since": str(int(last_timestamp))}
+
+                # Timeout: 15s connect, 60s read. ntfy emits keepalive every 45s,
+                # so 60s read timeout detects dropped connections reliably.
+                resp = requests.get(stream_url, params=params, stream=True, timeout=(15, 60))
 
                 if not resp.ok:
                     log.warning(f"ntfy stream returned HTTP {resp.status_code}. Retrying in 5s...")
@@ -259,7 +278,7 @@ class NtfyController:
                         break
                     continue
 
-                log.info(f"ntfy stream connection active on '{self.topic}'. Waiting for commands (type 'init' or 'status')...")
+                log.info(f"ntfy stream connection active on '{self.topic}'. Waiting for commands (type 'status' or 'init')...")
 
                 for line in resp.iter_lines(chunk_size=1):
                     if self._stop_event.is_set():
@@ -273,6 +292,10 @@ class NtfyController:
                         continue
 
                     msg_id = data.get("id")
+                    msg_time = data.get("time")
+                    if msg_time and isinstance(msg_time, (int, float)):
+                        last_timestamp = max(last_timestamp, int(msg_time))
+
                     if msg_id:
                         if msg_id in seen_ids:
                             continue
@@ -294,15 +317,31 @@ class NtfyController:
                         continue
 
                     log.info(f"Processing ntfy command: '{msg_text}' (id={msg_id})")
-                    res = self.handle_command(msg_text)
-                    if res:
-                        reply_body, reply_title, reply_priority = res
-                        self.publish_response(
-                            message=reply_body,
-                            title=reply_title,
-                            priority=reply_priority,
-                        )
+                    try:
+                        res = self.handle_command(msg_text)
+                        if res:
+                            reply_body = res[0]
+                            reply_title = res[1]
+                            reply_priority = res[2]
+                            click_url = None
+                            if hasattr(self.bot, "get_status"):
+                                b_status = self.bot.get_status()
+                                if b_status.get("is_stream_live"):
+                                    click_url = b_status.get("stream_url")
 
+                            self.publish_response(
+                                message=reply_body,
+                                title=reply_title,
+                                priority=reply_priority,
+                                click=click_url,
+                            )
+                    except Exception as cmd_err:
+                        log.error(f"Error handling ntfy command '{msg_text}': {cmd_err}", exc_info=True)
+
+            except requests.Timeout:
+                log.debug("ntfy stream read timed out (connection quiet). Reconnecting...")
+                if self._stop_event.wait(1.0):
+                    break
             except requests.RequestException as e:
                 log.debug(f"ntfy stream disconnected ({e}). Reconnecting in 3s...")
                 if self._stop_event.wait(3.0):
@@ -326,7 +365,7 @@ class NtfyController:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._stream_loop, name="ntfy_stream_poller", daemon=True)
         self._thread.start()
-        log.info(f"ntfy Two-Way Controller is ACTIVE on topic: '{self.topic}'")
+        log.info(f"ntfy Two-Way Controller is ACTIVE on topic: '{self.topic}' ({self.server_url})")
         return True
 
     def stop(self) -> None:

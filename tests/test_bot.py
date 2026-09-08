@@ -11,6 +11,7 @@ Validates:
 
 import sys
 import unittest
+from unittest import mock
 import json
 
 # Ensure UTF-8 output
@@ -226,6 +227,39 @@ class TestNtfyController(unittest.TestCase):
         self.assertFalse(self.ntfy.is_bot_alert_message("init"))
         self.assertFalse(self.ntfy.is_bot_alert_message("status"))
         self.assertFalse(self.ntfy.is_bot_alert_message("channel @Streamer"))
+
+    def test_slash_command_support(self):
+        res = self.ntfy.handle_command("/status")
+        self.assertIsNotNone(res)
+        self.assertIn("YouTube Alert Bot", res[0])
+
+        res_start = self.ntfy.handle_command("/start")
+        self.assertIsNotNone(res_start)
+        self.assertIn("Bot started", res_start[0])
+
+        res_stop = self.ntfy.handle_command("/stop")
+        self.assertIsNotNone(res_stop)
+        self.assertIn("stopped", res_stop[0])
+
+    def test_publish_response_mocked(self):
+        with mock.patch("requests.post") as mock_post:
+            mock_resp = mock.MagicMock()
+            mock_resp.ok = True
+            mock_resp.status_code = 200
+            mock_post.return_value = mock_resp
+
+            success = self.ntfy.publish_response(
+                message="Test status",
+                title="📊 Bot Status Report",
+                priority=3,
+            )
+            self.assertTrue(success)
+            self.assertTrue(mock_post.called)
+            # Verify first call was to ntfy server with root JSON payload
+            first_call_args = mock_post.call_args_list[0]
+            first_kwargs = first_call_args[1]
+            self.assertEqual(first_kwargs["json"]["title"], "📊 Bot Status Report")
+            self.assertEqual(first_kwargs["json"]["topic"], "test-yt-alert-topic")
 
 
 class TestKeepAliveWebDashboard(unittest.TestCase):

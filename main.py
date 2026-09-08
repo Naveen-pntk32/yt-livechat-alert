@@ -23,6 +23,7 @@ from yt_live_chat_alert import (
     LiveChatAlertBot,
     FAVORITE_CHANNEL,
     NTFY_TOPIC,
+    NTFY_SERVER,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
@@ -50,7 +51,7 @@ app = Flask(__name__)
 bot = LiveChatAlertBot()
 
 # Initialize Remote Controllers
-ntfy_controller = NtfyController(bot)
+ntfy_controller = NtfyController(bot, topic=NTFY_TOPIC, server_url=NTFY_SERVER)
 tg_controller = TelegramController(bot)
 
 
@@ -65,13 +66,17 @@ def health_dashboard():
         else '<span style="background:#6b7280;color:#fff;padding:2px 8px;border-radius:4px;">Offline</span>'
     )
     ntfy_status = (
-        f'<span style="color:#10b981;">Active ({ntfy_controller.topic})</span>'
-        if ntfy_controller.is_running or ntfy_controller.is_configured
-        else '<span style="color:#f59e0b;">Not Configured</span>'
+        f'<span style="color:#10b981;">Active ({ntfy_controller.topic} on {ntfy_controller.server_url})</span>'
+        if ntfy_controller.is_running
+        else f'<span style="color:#f59e0b;">Configured ({ntfy_controller.topic})</span>'
+        if ntfy_controller.is_configured
+        else '<span style="color:#6b7280;">Not Configured</span>'
     )
     tg_status = (
         '<span style="color:#10b981;">Active</span>'
-        if tg_controller.is_running or tg_controller.is_configured
+        if tg_controller.is_running
+        else '<span style="color:#f59e0b;">Configured</span>'
+        if tg_controller.is_configured
         else '<span style="color:#6b7280;">Disabled</span>'
     )
 
@@ -117,7 +122,14 @@ def health_dashboard():
 @app.route("/status", methods=["GET"])
 def status_api():
     """Returns JSON status."""
-    return jsonify(bot.get_status())
+    data = bot.get_status()
+    data["ntfy_configured"] = ntfy_controller.is_configured
+    data["ntfy_running"] = ntfy_controller.is_running
+    data["ntfy_topic"] = ntfy_controller.topic
+    data["ntfy_server"] = ntfy_controller.server_url
+    data["telegram_configured"] = tg_controller.is_configured
+    data["telegram_running"] = tg_controller.is_running
+    return jsonify(data)
 
 
 def graceful_shutdown(signum, frame):
