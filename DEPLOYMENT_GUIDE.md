@@ -85,7 +85,11 @@ Keep your YouTube Live Chat Alert Bot running 24/7 in the cloud—**completely f
    | `YT_CHANNEL` | `@YourStreamerHandle` | Target channel ID, @handle, or live video URL |
    | `YOUTUBE_API_KEY` | `AIzaSy...` | *(Recommended)* Guaranteed 100% live stream detection fallback |
    | `KEYWORDS` | `solo, 1v1, ff, free fire` | Keywords to detect |
-   | `AUTO_START_BOT` | `false` | Set to `false` so it waits for your `init` message! |
+   | `AUTO_START_BOT` | `false` | Set to `false` so it waits for schedule or your `init` message! |
+   | `DAILY_SCHEDULE_ENABLED` | `true` | Enables automatic daily 9:00 AM - 5:00 PM monitoring |
+   | `DAILY_START_TIME` | `09:00` | Scheduled daily start time (24h HH:MM) |
+   | `DAILY_STOP_TIME` | `17:00` | Scheduled daily stop time (24h HH:MM) |
+   | `SCHEDULE_TIMEZONE` | `Asia/Kolkata` | Your timezone (defaults to IST / Asia/Kolkata) |
 7. Click **Create Web Service**.
 8. Render will deploy your service and give you a public URL (e.g. `https://yt-livechat-alert.onrender.com`).
 
@@ -113,9 +117,11 @@ Open the **ntfy** app on your phone, open your topic, tap the **Send / Pen icon*
 
 | Type this in ntfy | Telegram Command | What it does | Confirmation You Receive |
 |---|---|---|---|
-| **`init`** or **`start`** | `/start` | **Triggers and starts chat monitoring** | 🟢 *Bot started! Monitoring channel: @Streamer* |
-| **`status`** | `/status` | Checks bot state, stream live status & uptime | 📊 *Bot Status Report (State, Channel, Matches)* |
-| **`stop`** | `/stop` | Pauses chat monitoring | 🛑 *Bot stopped successfully.* |
+| *(Automatic)* | *(Automatic)* | **Starts automatically at 9:00 AM & stops at 5:00 PM daily** | ⏰ *Auto-Start / Auto-Stop Notifications* |
+| **`schedule`** | `/schedule` | Views daily 9am-5pm schedule status (`schedule on` / `schedule off`) | ⏰ *Daily Schedule Status* |
+| **`init`** or **`start`** | `/start` | **Manually starts chat monitoring anytime** | 🟢 *Bot started! Monitoring channel: @Streamer* |
+| **`status`** | `/status` | Checks bot state, stream live status, schedule & uptime | 📊 *Bot Status Report (State, Channel, Matches)* |
+| **`stop`** | `/stop` | **Manually pauses chat monitoring anytime** | 🛑 *Bot stopped successfully.* |
 | **`channel @Streamer`** | `/channel @Streamer` | Switches target channel or direct live link (`https://youtu.be/...`) | ✅ *Target channel updated* |
 | **`keywords solo, 1v1`** | `/keywords solo, 1v1` | Updates watched keywords on the fly | ✅ *Keywords updated: solo, 1v1* |
 | **`help`** | `/help` | Shows command list | 🤖 *Command Guide / Interactive Buttons* |

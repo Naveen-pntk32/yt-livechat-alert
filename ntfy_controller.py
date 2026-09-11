@@ -41,11 +41,13 @@ class NtfyController:
         bot_instance: LiveChatAlertBot,
         topic: Optional[str] = None,
         server_url: Optional[str] = None,
+        scheduler: Optional[Any] = None,
     ):
         self.bot = bot_instance
         self.topic = (topic or NTFY_TOPIC).strip()
         env_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
         self.server_url = (server_url or env_server).rstrip("/")
+        self.scheduler = scheduler
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self.last_handled_time = time.time() - 5.0  # Only process new messages after startup
@@ -159,6 +161,10 @@ class NtfyController:
             "Target Stream / Channel",
             "Watched Keywords",
             "Keywords Error",
+            "⏰ Daily Schedule",
+            "⏰ Auto-Start",
+            "⏰ Auto-Stop",
+            "⏰ Schedule",
         )
         if any(marker in title for marker in bot_titles):
             return True
@@ -168,7 +174,7 @@ class NtfyController:
             return True
 
         # Check message prefixes
-        if text.startswith(("🚨", "🔴", "🟢", "🛑", "📊", "✅", "📺", "🔑", "❓", "🤖", "ℹ️", "⚠️")):
+        if text.startswith(("🚨", "🔴", "🟢", "🛑", "📊", "✅", "📺", "🔑", "❓", "🤖", "ℹ️", "⚠️", "⏰")):
             return True
 
         return False
@@ -202,7 +208,36 @@ class NtfyController:
             return msg, "🛑 Bot Stopped", 3
 
         elif command in ("status", "state", "info", "report", "check", "ping"):
-            return self.bot.get_status_text(), "📊 Bot Status Report", 3
+            status_text = self.bot.get_status_text()
+            if self.scheduler:
+                sc = self.scheduler.get_status()
+                sched_state = "Active" if sc["enabled"] else "Disabled"
+                status_text += f"\n• *Daily Schedule:* {sched_state} ({sc['start_time']} - {sc['stop_time']} {sc['timezone']})"
+            return status_text, "📊 Bot Status Report", 3
+
+        elif command in ("schedule", "timer", "cron", "timing", "hours"):
+            if not self.scheduler:
+                return "Daily scheduler is not enabled in this deployment.", "⏰ Schedule", 3
+            if args.lower() in ("on", "enable", "start"):
+                self.scheduler.set_enabled(True)
+                sc = self.scheduler.get_status()
+                return f"⏰ Daily schedule enabled!\n• Window: {sc['start_time']} - {sc['stop_time']} ({sc['timezone']})\n• Next: {sc['next_action']}", "⏰ Schedule Enabled", 3
+            elif args.lower() in ("off", "disable", "pause", "stop"):
+                self.scheduler.set_enabled(False)
+                return "⏸️ Daily schedule paused. Bot will only start when you manually type 'start' or 'init'.", "⏰ Schedule Paused", 3
+            else:
+                sc = self.scheduler.get_status()
+                state_str = "🟢 Active (Daily Auto 9am-5pm)" if sc["enabled"] else "⏸️ Paused (Manual Only)"
+                msg = (
+                    f"⏰ *Daily Schedule Status:* {state_str}\n"
+                    f"• *Window:* {sc['start_time']} - {sc['stop_time']} ({sc['timezone']})\n"
+                    f"• *Current Time:* {sc['current_time']}\n"
+                    f"• *Next Action:* {sc['next_action']}\n\n"
+                    f"Controls:\n"
+                    f"• `schedule off` - Pause automatic daily triggers\n"
+                    f"• `schedule on` - Re-enable daily auto triggers"
+                )
+                return msg, "⏰ Daily Schedule", 3
 
         elif command in ("channel", "setchannel", "target", "streamer"):
             if not args:
@@ -235,6 +270,7 @@ class NtfyController:
                 "• init / start - Trigger & start chat monitoring\n"
                 "• stop - Pause chat monitoring\n"
                 "• status - View bot state, live status, chat stats & uptime\n"
+                "• schedule - View or toggle daily 9am-5pm schedule\n"
                 "• channel <@handle or link> - Set streamer channel or live video link\n"
                 "• keywords <k1, k2> - Update keywords (e.g. keywords solo, 1v1)\n"
                 "• help - Show this command guide"

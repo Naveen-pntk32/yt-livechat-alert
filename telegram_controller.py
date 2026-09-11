@@ -42,10 +42,12 @@ class TelegramController:
         bot_instance: LiveChatAlertBot,
         token: Optional[str] = None,
         admin_chat_id: Optional[str] = None,
+        scheduler: Optional[Any] = None,
     ):
         self.bot = bot_instance
         self.token = (token or TELEGRAM_BOT_TOKEN).strip()
         self.admin_chat_id = str(admin_chat_id or TELEGRAM_CHAT_ID).strip()
+        self.scheduler = scheduler
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self.last_update_id = 0
@@ -116,7 +118,35 @@ class TelegramController:
             return msg
 
         elif cmd in ("/status", "status", "/info", "info"):
-            return self.bot.get_status_text()
+            status_text = self.bot.get_status_text()
+            if self.scheduler:
+                sc = self.scheduler.get_status()
+                sched_state = "Active" if sc["enabled"] else "Disabled"
+                status_text += f"\n• *Daily Schedule:* {sched_state} (`{sc['start_time']} - {sc['stop_time']}` {sc['timezone']})"
+            return status_text
+
+        elif cmd in ("/schedule", "schedule", "/hours", "/timer"):
+            if not self.scheduler:
+                return "⏰ Daily scheduler is not configured in this deployment."
+            if args.lower() in ("on", "enable", "start"):
+                self.scheduler.set_enabled(True)
+                sc = self.scheduler.get_status()
+                return f"⏰ *Daily Schedule Enabled!*\n• Window: `{sc['start_time']} - {sc['stop_time']}` ({sc['timezone']})\n• Next: {sc['next_action']}"
+            elif args.lower() in ("off", "disable", "pause", "stop"):
+                self.scheduler.set_enabled(False)
+                return "⏸️ *Daily Schedule Paused.*\nBot will only start when you manually send `/start`."
+            else:
+                sc = self.scheduler.get_status()
+                state_str = "🟢 Active (Daily Auto 9am-5pm)" if sc["enabled"] else "⏸️ Paused (Manual Only)"
+                return (
+                    f"⏰ *Daily Schedule Status:* {state_str}\n"
+                    f"• *Window:* `{sc['start_time']} - {sc['stop_time']}` ({sc['timezone']})\n"
+                    f"• *Current Time:* `{sc['current_time']}`\n"
+                    f"• *Next Action:* {sc['next_action']}\n\n"
+                    f"Commands:\n"
+                    f"• `/schedule off` - Pause automatic daily triggers\n"
+                    f"• `/schedule on` - Re-enable daily auto triggers"
+                )
 
         elif cmd in ("/channel", "channel", "/setchannel"):
             if not args:
@@ -147,7 +177,8 @@ class TelegramController:
         elif cmd in ("/help", "help", "/menu", "menu"):
             return (
                 "🤖 *YouTube Live Chat Alert Bot - Controls*\n\n"
-                "• `/status` - Check if bot is running, streamer is live, chat stats & uptime\n"
+                "• `/status` - Check bot state, streamer live status, chat stats & uptime\n"
+                "• `/schedule` - View or toggle daily 9am-5pm schedule\n"
                 "• `/start` - Start monitoring YouTube live stream\n"
                 "• `/stop` - Pause / stop monitoring\n"
                 "• `/channel <@handle or link>` - Switch target channel or live video link\n"
@@ -165,7 +196,8 @@ class TelegramController:
         """Creates quick-reply buttons for easy 1-tap mobile control."""
         return {
             "keyboard": [
-                [{"text": "/status"}, {"text": "/start"}, {"text": "/stop"}],
+                [{"text": "/status"}, {"text": "/schedule"}],
+                [{"text": "/start"}, {"text": "/stop"}],
                 [{"text": "/channel"}, {"text": "/keywords"}, {"text": "/help"}],
             ],
             "resize_keyboard": True,

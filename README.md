@@ -177,9 +177,11 @@ Send these commands inside your **ntfy** topic or via **Telegram**:
 
 | ntfy Command | Telegram Command | Action | Bot Response |
 |---|---|---|---|
-| **`init`** or **`start`** | `/start` | **Starts chat monitoring** | 🟢 *Bot started! Monitoring channel: @handle (Title)* |
-| **`status`** | `/status` | **Checks bot status & stats** | 📊 *Status report with channel handle, stream URL, scan count & uptime* |
-| **`stop`** | `/stop` | **Pauses chat monitoring** | 🛑 *Bot stopped successfully.* |
+| *(Automatic)* | *(Automatic)* | **Starts automatically at 9:00 AM & stops at 5:00 PM daily** | ⏰ *Auto-Start / Auto-Stop Notifications* |
+| **`schedule`** | `/schedule` | **Views daily 9am-5pm schedule status** | ⏰ *Schedule status (`schedule on` / `schedule off`)* |
+| **`init`** or **`start`** | `/start` | **Manually starts chat monitoring anytime** | 🟢 *Bot started! Monitoring channel: @handle (Title)* |
+| **`status`** | `/status` | **Checks bot status, schedule & stats** | 📊 *Status report with channel handle, stream URL, scan count & uptime* |
+| **`stop`** | `/stop` | **Manually pauses chat monitoring anytime** | 🛑 *Bot stopped successfully.* |
 | **`channel`** | `/channel` | **Displays current target** | 📺 *Current target: @handle (Channel Title)* |
 | **`channel @NewName`** | `/channel @NewName` | **Switches streamer target** | ✅ *Target channel updated to: @NewName* |
 | **`keywords`** | `/keywords` | **Displays active keywords** | 🔑 *Watched Keywords: solo, 1v1, ff...* |
@@ -193,11 +195,15 @@ Send these commands inside your **ntfy** topic or via **Telegram**:
 | Variable | Default | Required? | Description |
 |---|---|---|---|
 | `YT_CHANNEL` | `""` | **Yes** | Target streamer YouTube Channel ID (`UC...`), `@handle`, or direct live video link. |
+| `DAILY_SCHEDULE_ENABLED` | `true` | No | Automatically start at 9:00 AM and stop at 5:00 PM every day without manual typing. |
+| `DAILY_START_TIME` | `09:00` | No | Daily auto-start time in 24-hour format (`HH:MM`). |
+| `DAILY_STOP_TIME` | `17:00` | No | Daily auto-stop time in 24-hour format (`HH:MM`). |
+| `SCHEDULE_TIMEZONE` | `Asia/Kolkata` | No | Timezone for the daily schedule (default Indian Standard Time). |
 | `NTFY_TOPIC` | `""` | **Yes** | ntfy topic name used for phone notifications and two-way control. |
 | `NTFY_SERVER` | `https://ntfy.sh` | No | Base ntfy server URL (allows custom or self-hosted servers to avoid public rate limits). |
 | `YOUTUBE_API_KEY` | `""` | Recommended | Official YouTube Data API v3 key used as fallback for 100% reliable live detection. |
 | `KEYWORDS` | Default gaming set | No | Comma-separated keywords to monitor in the live chat. |
-| `AUTO_START_BOT` | `false` | No | If `true`, bot begins monitoring immediately upon server boot; if `false`, waits for `init`. |
+| `AUTO_START_BOT` | `false` | No | If `true`, bot begins monitoring immediately upon server boot; if `false`, waits for schedule or `init`. |
 | `TELEGRAM_BOT_TOKEN` | `""` | Optional | Telegram Bot API token from @BotFather. |
 | `TELEGRAM_CHAT_ID` | `""` | Optional | Your Telegram User ID for alerts. |
 | `PORT` | `5000` | No | HTTP server port for the keep-alive dashboard. |

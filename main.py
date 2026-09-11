@@ -29,6 +29,7 @@ from yt_live_chat_alert import (
 )
 from ntfy_controller import NtfyController
 from telegram_controller import TelegramController
+from scheduler import DailyScheduler
 
 # Ensure UTF-8 output on console
 if hasattr(sys.stdout, "reconfigure"):
@@ -55,6 +56,27 @@ ntfy_controller = NtfyController(bot, topic=NTFY_TOPIC, server_url=NTFY_SERVER)
 tg_controller = TelegramController(bot)
 
 
+def broadcast_notify(message: str, title: str):
+    """Dispatches announcement notifications to both ntfy and Telegram."""
+    if ntfy_controller.is_configured:
+        try:
+            ntfy_controller.publish_response(message, title=title, priority=4, tags=["clock", "robot"])
+        except Exception as e:
+            log.warning(f"ntfy broadcast failed: {e}")
+
+    if tg_controller.is_configured and tg_controller.admin_chat_id:
+        try:
+            tg_controller.send_message(tg_controller.admin_chat_id, f"*{title}*\n\n{message}")
+        except Exception as e:
+            log.warning(f"Telegram broadcast failed: {e}")
+
+
+# Initialize Daily Automation Scheduler (09:00 - 17:00 IST)
+daily_scheduler = DailyScheduler(bot, notify_callback=broadcast_notify)
+ntfy_controller.scheduler = daily_scheduler
+tg_controller.scheduler = daily_scheduler
+
+
 @app.route("/", methods=["GET"])
 def health_dashboard():
     """Health check endpoint pinged by UptimeRobot to keep Render free tier awake 24/7."""
@@ -77,6 +99,12 @@ def health_dashboard():
         if tg_controller.is_running
         else '<span style="color:#f59e0b;">Configured</span>'
         if tg_controller.is_configured
+        else '<span style="color:#6b7280;">Disabled</span>'
+    )
+    sched_status = daily_scheduler.get_status()
+    sched_badge = (
+        f'<span style="color:#10b981;">Active ({sched_status["start_time"]} - {sched_status["stop_time"]} {sched_status["timezone"]})</span>'
+        if sched_status["enabled"]
         else '<span style="color:#6b7280;">Disabled</span>'
     )
 
@@ -104,13 +132,16 @@ def health_dashboard():
         <div class="row"><span class="label">State</span><span class="val" style="color:{state_color};">{status['state']}</span></div>
         <div class="row"><span class="label">Target Channel</span><span class="val">{status.get('target_display') or status['target_channel'] or 'None'}</span></div>
         <div class="row"><span class="label">Stream Status</span><span class="val">{stream_badge}</span></div>
+        <div class="row"><span class="label">Daily Schedule</span><span class="val">{sched_badge}</span></div>
+        <div class="row"><span class="label">Next Schedule Action</span><span class="val">{sched_status['next_action']}</span></div>
         <div class="row"><span class="label">ntfy Remote Control</span><span class="val">{ntfy_status}</span></div>
         <div class="row"><span class="label">Telegram Remote</span><span class="val">{tg_status}</span></div>
         <div class="row"><span class="label">Uptime</span><span class="val">{status['uptime']}</span></div>
         <div class="row"><span class="label">Matches Found</span><span class="val">{status['total_matches']}</span></div>
         <div class="row"><span class="label">Keywords</span><span class="val">{' '.join(f'<span class="kw-tag">{k}</span>' for k in status['keywords'][:8])}</span></div>
         <div class="tip">
-            💡 <b>Remote Trigger:</b> Open your ntfy app, open topic <code>{ntfy_controller.topic or 'your-topic'}</code>, and type <b>init</b> to start monitoring.
+            ⏰ <b>Daily Schedule:</b> Runs automatically <b>{sched_status['start_time']} - {sched_status['stop_time']}</b> daily.<br>
+            💡 <b>Remote Trigger:</b> You can still type <b>start</b> or <b>stop</b> anytime in ntfy or Telegram!
         </div>
     </div>
 </body>
@@ -123,6 +154,7 @@ def health_dashboard():
 def status_api():
     """Returns JSON status."""
     data = bot.get_status()
+    data["scheduler"] = daily_scheduler.get_status()
     data["ntfy_configured"] = ntfy_controller.is_configured
     data["ntfy_running"] = ntfy_controller.is_running
     data["ntfy_topic"] = ntfy_controller.topic
@@ -134,6 +166,7 @@ def status_api():
 
 def graceful_shutdown(signum, frame):
     log.info("Shutdown signal received. Stopping services...")
+    daily_scheduler.stop()
     ntfy_controller.stop()
     tg_controller.stop()
     bot.stop()
@@ -157,7 +190,12 @@ def start_services():
         log.info("Starting Telegram Remote Controller...")
         tg_controller.start()
 
-    # 3. Auto-start bot on boot if requested
+    # 3. Start Daily Automation Scheduler
+    if daily_scheduler.enabled:
+        log.info(f"Starting Daily Automation Scheduler ({daily_scheduler.start_time_str} - {daily_scheduler.stop_time_str} {daily_scheduler.timezone_str})...")
+        daily_scheduler.start()
+
+    # 4. Auto-start bot on boot if requested
     auto_start = os.environ.get("AUTO_START_BOT", "false").strip().lower() in ("true", "1", "yes")
     if auto_start:
         if FAVORITE_CHANNEL:
@@ -168,7 +206,7 @@ def start_services():
     else:
         log.info("Bot is in on-demand mode. Send 'init' in your ntfy topic to start monitoring!")
 
-    # 4. Start Keep-Alive Web Server
+    # 5. Start Keep-Alive Web Server
     port = int(os.environ.get("PORT", 5000))
     host = os.environ.get("HOST", "0.0.0.0")
     log.info(f"Starting Keep-Alive Web Server on {host}:{port}")
