@@ -51,6 +51,7 @@ class TestLiveChatAlertBotController(unittest.TestCase):
             channel="@TestChannel",
             keywords=["solo", "custom"],
             idle_check_interval=999,
+            state_file=False,
         )
 
     def tearDown(self):
@@ -128,10 +129,23 @@ class TestLiveChatAlertBotController(unittest.TestCase):
         self.assertFalse(is_video_from_channel("vid123", ""))
 
     def test_state_persistence(self):
-        self.bot.update_channel("@PersistChannel")
-        self.bot.update_keywords(["persist_kw"])
-        self.assertEqual(self.bot.channel, "@PersistChannel")
-        self.assertEqual(self.bot.keywords, ["persist_kw"])
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            temp_path = Path(tf.name)
+        try:
+            bot = LiveChatAlertBot(channel="@PersistChannel", keywords=["persist_kw"], state_file=temp_path)
+            bot.update_channel("@PersistChannel")
+            bot.update_keywords(["persist_kw"])
+            self.assertEqual(bot.channel, "@PersistChannel")
+            self.assertEqual(bot.keywords, ["persist_kw"])
+            with open(temp_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["channel"], "@PersistChannel")
+            self.assertEqual(data["keywords"], ["persist_kw"])
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
     def test_format_author(self):
         from yt_live_chat_alert import format_author
@@ -168,7 +182,7 @@ class TestLiveChatAlertBotController(unittest.TestCase):
 
 class TestNtfyController(unittest.TestCase):
     def setUp(self):
-        self.bot = LiveChatAlertBot(channel="@GamerLive", keywords=["solo", "ff"], idle_check_interval=1)
+        self.bot = LiveChatAlertBot(channel="@GamerLive", keywords=["solo", "ff"], idle_check_interval=1, state_file=False)
         self.bot.channel_id = "UCdummy1234567890123456"
         self.ntfy = NtfyController(self.bot, topic="test-yt-alert-topic")
 

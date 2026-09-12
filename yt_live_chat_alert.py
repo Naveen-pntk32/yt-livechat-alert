@@ -43,7 +43,7 @@ import threading
 from pathlib import Path
 from collections import deque
 import concurrent.futures
-from typing import Optional, Tuple, List, Dict, Callable, Any
+from typing import Optional, Tuple, List, Dict, Callable, Any, Union
 from urllib.parse import urlparse, parse_qs
 
 import requests
@@ -184,10 +184,25 @@ class YouTubeApiManager:
         self.api_keys = api_keys
         self.current_index = 0
         self._services: Dict[int, Resource] = {}
+        self.quota_exhausted = False
+        self._exhausted_time: Optional[float] = None
 
     @property
     def has_keys(self) -> bool:
+        if self.quota_exhausted:
+            # Auto-reset quota exhaustion check after 2 hours (in case daily quota resets)
+            if self._exhausted_time and (time.time() - self._exhausted_time > 7200):
+                self.quota_exhausted = False
+                self._exhausted_time = None
+            else:
+                return False
         return bool(self.api_keys)
+
+    def mark_quota_exhausted(self) -> None:
+        if not self.quota_exhausted:
+            self.quota_exhausted = True
+            self._exhausted_time = time.time()
+            log.warning("YouTube API quota reached. System seamlessly running in 100% 0-quota web mode.")
 
     def get_service(self) -> Optional[Resource]:
         if not self.has_keys or not GOOGLE_API_AVAILABLE:
@@ -202,7 +217,7 @@ class YouTubeApiManager:
     def rotate_key(self) -> bool:
         """Rotates to the next available API key. Returns False if all keys exhausted."""
         if len(self.api_keys) <= 1:
-            log.warning("Only one API key configured. Cannot rotate.")
+            self.mark_quota_exhausted()
             return False
 
         self.current_index = (self.current_index + 1) % len(self.api_keys)
@@ -212,17 +227,26 @@ class YouTubeApiManager:
 
 
 def is_quota_exceeded_error(error: Exception) -> bool:
-    """Check if an HttpError is a YouTube quota-exceeded error."""
-    if not GOOGLE_API_AVAILABLE or not isinstance(error, HttpError):
+    """Check if an HttpError or Exception is a YouTube quota-exceeded or rate-limit error."""
+    if not GOOGLE_API_AVAILABLE:
         return False
 
-    details = getattr(error, "error_details", None)
-    if isinstance(details, list):
-        for detail in details:
-            if isinstance(detail, dict) and detail.get("reason") == "quotaExceeded":
+    if isinstance(error, HttpError):
+        status = getattr(error.resp, "status", None)
+        if status in (403, 429):
+            err_str = str(error).lower()
+            if any(term in err_str for term in ("quota", "ratelimit", "limitexceeded", "daily")):
                 return True
+        details = getattr(error, "error_details", None)
+        if isinstance(details, list):
+            for detail in details:
+                if isinstance(detail, dict):
+                    r = detail.get("reason", "")
+                    if r in ("quotaExceeded", "rateLimitExceeded", "dailyLimitExceeded", "userRateLimitExceeded"):
+                        return True
 
-    return "quotaExceeded" in str(error)
+    err_str = str(error).lower()
+    return "quotaexceeded" in err_str or "quota exceeded" in err_str or "ratelimitexceeded" in err_str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,6 +538,8 @@ def is_video_from_channel(
                 m = re.search(r'"channelId":"(UC[\w-]{22})"', resp.text)
             if not m:
                 m = re.search(r'"externalChannelId":"(UC[\w-]{22})"', resp.text)
+            if not m:
+                m = re.search(r'"browseId":"(UC[\w-]{22})"', resp.text)
             if m:
                 return m.group(1) == channel_id
     except Exception as e:
@@ -555,46 +581,56 @@ def find_live_video_id_api(api_manager: YouTubeApiManager, channel_id: str) -> O
 def find_candidate_video_id(
     channel_id: str,
     api_manager: Optional[YouTubeApiManager] = None,
+    channel_handle: Optional[str] = None,
 ) -> Optional[str]:
     """
     Multi-tier live stream detector with strict channel ownership verification:
-    1. Official YouTube Data API first if configured (100% accurate & channel-locked)
-    2. Zero-quota web check on /channel/UC.../live (verified by channelId)
-    3. Zero-quota web check on /channel/UC.../streams (verified by channelId)
+    1. Official YouTube Data API first if configured and not quota-exhausted
+    2. Zero-quota web check on /channel/UC.../live and /@handle/live
+    3. Zero-quota web check on /channel/UC.../streams and /@handle/streams
     """
-    # Strategy 1: Official YouTube Data API first if keys are available
-    # API search by channelId guarantees zero false positives and never picks up other channels!
+    # Strategy 1: Official YouTube Data API first if keys are available and not exhausted
     if api_manager and api_manager.has_keys:
-        api_vid = find_live_video_id_api(api_manager, channel_id)
-        if api_vid:
-            log.info(f"Found active live stream via Official API: {api_vid}")
-            return api_vid
+        try:
+            api_vid = find_live_video_id_api(api_manager, channel_id)
+            if api_vid:
+                log.info(f"Found active live stream via Official API: {api_vid}")
+                return api_vid
+        except Exception as e:
+            if is_quota_exceeded_error(e):
+                api_manager.mark_quota_exhausted()
+            else:
+                log.debug(f"API search error: {e}")
 
     candidate_ids = []
 
-    # Strategy 2: Check /channel/UC.../live
-    live_url = f"https://www.youtube.com/channel/{channel_id}/live"
-    try:
-        resp = requests.get(live_url, headers=_WEB_HEADERS, timeout=10, allow_redirects=True)
-        if resp.ok and "consent.youtube.com" not in resp.url:
-            query = parse_qs(urlparse(resp.url).query)
-            redirected_v = query.get("v", [None])[0]
-            if redirected_v and redirected_v not in candidate_ids:
-                candidate_ids.append(redirected_v)
+    # Strategy 2: Check /live endpoints (both /channel/UC... and /@handle)
+    target_bases = [f"https://www.youtube.com/channel/{channel_id}"]
+    if channel_handle:
+        clean_h = channel_handle if channel_handle.startswith("@") else f"@{channel_handle}"
+        target_bases.insert(0, f"https://www.youtube.com/{clean_h}")
 
-            # Extract videoIds from liveStreamability
-            streamability = re.findall(r'"liveStreamability"[^}]+?"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
-            for vid in streamability:
-                if vid not in candidate_ids:
-                    candidate_ids.append(vid)
+    for base in target_bases:
+        live_url = f"{base}/live"
+        try:
+            resp = requests.get(live_url, headers=_WEB_HEADERS, timeout=10, allow_redirects=True)
+            if resp.ok and "consent.youtube.com" not in resp.url:
+                query = parse_qs(urlparse(resp.url).query)
+                redirected_v = query.get("v", [None])[0]
+                if redirected_v and redirected_v not in candidate_ids:
+                    candidate_ids.append(redirected_v)
 
-            # Extract videoIds from watchEndpoint
-            watch_endpoints = re.findall(r'"watchEndpoint":\s*\{\s*"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
-            for vid in watch_endpoints:
-                if vid not in candidate_ids:
-                    candidate_ids.append(vid)
-    except Exception as e:
-        log.debug(f"Web /live lookup error for channel {channel_id}: {e}")
+                streamability = re.findall(r'"liveStreamability"[^}]+?"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
+                for vid in streamability:
+                    if vid not in candidate_ids:
+                        candidate_ids.append(vid)
+
+                watch_endpoints = re.findall(r'"watchEndpoint":\s*\{\s*"videoId":"([a-zA-Z0-9_-]{11})"', resp.text)
+                for vid in watch_endpoints:
+                    if vid not in candidate_ids:
+                        candidate_ids.append(vid)
+        except Exception as e:
+            log.debug(f"Web /live lookup error for {base}: {e}")
 
     for vid in candidate_ids:
         if is_video_actually_live(vid, api_manager=api_manager):
@@ -604,20 +640,21 @@ def find_candidate_video_id(
             else:
                 log.info(f"Ignoring recommended live stream {vid} (does not belong to channel {channel_id})")
 
-    # Strategy 3: Check /channel/UC.../streams
-    streams_url = f"https://www.youtube.com/channel/{channel_id}/streams"
+    # Strategy 3: Check /streams endpoints
     streams_candidates = []
-    try:
-        resp = requests.get(streams_url, headers=_WEB_HEADERS, timeout=10, allow_redirects=True)
-        if resp.ok and "consent.youtube.com" not in resp.url:
-            for m in re.finditer(r'"videoId":"([a-zA-Z0-9_-]{11})"', resp.text):
-                vid = m.group(1)
-                if vid not in candidate_ids and vid not in streams_candidates:
-                    streams_candidates.append(vid)
-                if len(streams_candidates) >= 6:
-                    break
-    except Exception as e:
-        log.debug(f"Web /streams lookup error for channel {channel_id}: {e}")
+    for base in target_bases:
+        streams_url = f"{base}/streams"
+        try:
+            resp = requests.get(streams_url, headers=_WEB_HEADERS, timeout=10, allow_redirects=True)
+            if resp.ok and "consent.youtube.com" not in resp.url:
+                for m in re.finditer(r'"videoId":"([a-zA-Z0-9_-]{11})"', resp.text):
+                    vid = m.group(1)
+                    if vid not in candidate_ids and vid not in streams_candidates:
+                        streams_candidates.append(vid)
+                    if len(streams_candidates) >= 8:
+                        break
+        except Exception as e:
+            log.debug(f"Web /streams lookup error for {base}: {e}")
 
     for vid in streams_candidates:
         if is_video_actually_live(vid, api_manager=api_manager):
@@ -659,8 +696,10 @@ def get_stream_status_api(api_manager: YouTubeApiManager, video_id: str) -> Tupl
 
     except Exception as error:
         if is_quota_exceeded_error(error):
-            raise QuotaExceededError(str(error)) from error
-        log.warning(f"Error checking stream status via API: {error}")
+            api_manager.mark_quota_exhausted()
+            log.warning("YouTube API quota reached during stream status check.")
+        else:
+            log.warning(f"Error checking stream status via API: {error}")
         return "unknown", None
 
 
@@ -1309,7 +1348,8 @@ def watch_chat_api(
                 if api_manager.rotate_key():
                     continue
                 else:
-                    raise QuotaExceededError("All YouTube API keys exhausted.") from error
+                    api_manager.mark_quota_exhausted()
+                    return
 
             error_text = str(error)
             if "liveChatEnded" in error_text or "live chat is no longer live" in error_text.lower():
@@ -1458,10 +1498,19 @@ class LiveChatAlertBot:
         keywords: Optional[List[str]] = None,
         api_keys: Optional[List[str]] = None,
         idle_check_interval: Optional[int] = None,
+        state_file: Optional[Union[str, Path, bool]] = None,
     ):
+        if state_file is False:
+            self.state_file: Optional[Path] = None
+        elif state_file is not None:
+            self.state_file = Path(state_file)
+        else:
+            self.state_file = _STATE_FILE
+
         self.channel = (channel or FAVORITE_CHANNEL).strip()
         self.channel_handle: Optional[str] = self.channel if self.channel.startswith("@") else None
         self.channel_title: Optional[str] = None
+        self.channel_id: Optional[str] = None
         self.keywords = list(keywords) if keywords is not None else list(KEYWORDS)
         self.api_keys = list(api_keys) if api_keys is not None else list(YOUTUBE_API_KEYS)
         self.api_manager = YouTubeApiManager(self.api_keys)
@@ -1473,7 +1522,6 @@ class LiveChatAlertBot:
 
         self.keyword_patterns = compile_keyword_patterns(self.keywords)
 
-        self.channel_id: Optional[str] = None
         self.direct_video_id: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -1490,36 +1538,43 @@ class LiveChatAlertBot:
         self.last_error: Optional[str] = None
 
     def _load_state(self) -> None:
-        if _STATE_FILE.exists():
-            try:
-                with open(_STATE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                saved_channel = data.get("channel")
-                saved_handle = data.get("channel_handle")
-                saved_title = data.get("channel_title")
-                saved_keywords = data.get("keywords")
-                if saved_channel:
-                    self.channel = saved_channel
-                if saved_handle:
-                    self.channel_handle = saved_handle
-                if saved_title:
-                    self.channel_title = saved_title
-                if saved_keywords and isinstance(saved_keywords, list):
-                    self.keywords = [k.strip() for k in saved_keywords if k.strip()]
-                display = self.channel_handle or self.channel
-                log.info(f"Loaded persistent bot state: target='{display}', keywords={self.keywords}")
-            except Exception as e:
-                log.warning(f"Could not load bot state file: {e}")
+        if not self.state_file or not self.state_file.exists():
+            return
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved_channel = data.get("channel")
+            saved_handle = data.get("channel_handle")
+            saved_title = data.get("channel_title")
+            saved_channel_id = data.get("channel_id")
+            saved_keywords = data.get("keywords")
+            if saved_channel:
+                self.channel = saved_channel
+            if saved_handle:
+                self.channel_handle = saved_handle
+            if saved_title:
+                self.channel_title = saved_title
+            if saved_channel_id:
+                self.channel_id = saved_channel_id
+            if saved_keywords and isinstance(saved_keywords, list):
+                self.keywords = [k.strip() for k in saved_keywords if k.strip()]
+            display = self.channel_handle or self.channel
+            log.info(f"Loaded persistent bot state: target='{display}', keywords={self.keywords}")
+        except Exception as e:
+            log.warning(f"Could not load bot state file: {e}")
 
     def _save_state(self) -> None:
+        if not self.state_file:
+            return
         try:
             data = {
                 "channel": self.channel,
                 "channel_handle": self.channel_handle,
                 "channel_title": self.channel_title,
+                "channel_id": self.channel_id,
                 "keywords": self.keywords,
             }
-            with open(_STATE_FILE, "w", encoding="utf-8") as f:
+            with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             log.warning(f"Could not save bot state file: {e}")
@@ -1771,20 +1826,22 @@ class LiveChatAlertBot:
                     if is_video_actually_live(self.direct_video_id, self.api_manager):
                         candidate_id = self.direct_video_id
                 elif self.channel_id:
-                    candidate_id = find_candidate_video_id(self.channel_id, self.api_manager)
+                    candidate_id = find_candidate_video_id(self.channel_id, self.api_manager, channel_handle=self.channel_handle)
 
                 if candidate_id:
                     is_live = True
                     live_chat_id = None
 
-                    if self.api_manager.has_keys:
+                    if self.api_manager and self.api_manager.has_keys:
                         try:
                             status, live_chat_id = get_stream_status_api(self.api_manager, candidate_id)
                             if status == "upcoming":
                                 is_live = False
                             elif status == "none":
                                 is_live = False
-                        except QuotaExceededError:
+                        except Exception as e:
+                            if is_quota_exceeded_error(e):
+                                self.api_manager.mark_quota_exhausted()
                             is_live = True
 
                     if is_live:
@@ -1814,9 +1871,11 @@ class LiveChatAlertBot:
                     last_notified_video_id = None
 
             except QuotaExceededError:
-                self.last_error = f"All YouTube API quotas exceeded. Backing off {QUOTA_BACKOFF_SECONDS}s."
-                log.error(self.last_error)
-                if self._stop_event.wait(QUOTA_BACKOFF_SECONDS):
+                if self.api_manager:
+                    self.api_manager.mark_quota_exhausted()
+                self.last_error = "YouTube API quota reached. Continuing 100% 0-quota web monitoring without interruption."
+                log.warning(self.last_error)
+                if self._stop_event.wait(self.idle_check_interval):
                     break
                 continue
 
