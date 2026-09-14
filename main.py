@@ -26,6 +26,8 @@ from yt_live_chat_alert import (
     NTFY_SERVER,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    find_live_video_id_rss,
+    find_candidate_video_id,
 )
 from ntfy_controller import NtfyController
 from telegram_controller import TelegramController
@@ -82,11 +84,17 @@ def health_dashboard():
     """Health check endpoint pinged by UptimeRobot to keep Render free tier awake 24/7."""
     status = bot.get_status()
     state_color = "#10b981" if status["is_running"] else "#ef4444"
-    stream_badge = (
-        '<span style="background:#ef4444;color:#fff;padding:2px 8px;border-radius:4px;">🔴 LIVE</span>'
-        if status["is_stream_live"]
-        else '<span style="background:#6b7280;color:#fff;padding:2px 8px;border-radius:4px;">Offline</span>'
-    )
+    if status["is_stream_live"] and status.get("current_video_id"):
+        stream_url = status.get("stream_url") or f"https://youtu.be/{status['current_video_id']}"
+        stream_badge = (
+            f'<a href="{stream_url}" target="_blank" style="background:#ef4444;color:#fff;'
+            f'padding:3px 10px;border-radius:6px;text-decoration:none;font-weight:700;'
+            f'display:inline-flex;align-items:center;gap:4px;">'
+            f'🔴 LIVE NOW ({status["current_video_id"]}) ↗</a>'
+        )
+    else:
+        stream_badge = '<span style="background:#6b7280;color:#fff;padding:2px 8px;border-radius:4px;">Offline</span>'
+
     ntfy_status = (
         f'<span style="color:#10b981;">Active ({ntfy_controller.topic} on {ntfy_controller.server_url})</span>'
         if ntfy_controller.is_running
@@ -97,7 +105,7 @@ def health_dashboard():
     tg_status = (
         '<span style="color:#10b981;">Active</span>'
         if tg_controller.is_running
-        else '<span style="color:#f59e0b;">Configured</span>'
+        else f'<span style="color:#f59e0b;">Configured</span>'
         if tg_controller.is_configured
         else '<span style="color:#6b7280;">Disabled</span>'
     )
@@ -161,6 +169,34 @@ def status_api():
     data["ntfy_server"] = ntfy_controller.server_url
     data["telegram_configured"] = tg_controller.is_configured
     data["telegram_running"] = tg_controller.is_running
+    return jsonify(data)
+
+
+@app.route("/debug", methods=["GET"])
+def debug_api():
+    """Diagnostic endpoint to inspect live stream detection signals and API state."""
+    data = bot.get_status()
+    data["scheduler"] = daily_scheduler.get_status()
+    data["api_has_keys"] = bot.api_manager.has_keys if bot.api_manager else False
+    data["api_quota_exhausted"] = bot.api_manager.quota_exhausted if bot.api_manager else False
+    data["api_keys_count"] = len(bot.api_manager.api_keys) if bot.api_manager else 0
+
+    cid = bot.channel_id
+    if cid:
+        try:
+            data["rss_test_result"] = find_live_video_id_rss(cid, bot.api_manager)
+        except Exception as e:
+            data["rss_test_result"] = f"Error: {e}"
+
+        try:
+            data["candidate_test_result"] = find_candidate_video_id(
+                cid,
+                bot.api_manager,
+                channel_handle=bot.channel_handle,
+            )
+        except Exception as e:
+            data["candidate_test_result"] = f"Error: {e}"
+
     return jsonify(data)
 
 

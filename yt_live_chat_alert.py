@@ -474,7 +474,7 @@ def is_video_actually_live(video_id: str, api_manager: Optional[YouTubeApiManage
         # Check 1: Live chat page continuation
         chat_url = f"https://www.youtube.com/live_chat?v={video_id}"
         resp = requests.get(chat_url, headers=_WEB_HEADERS, timeout=10)
-        if '"continuation":"' in resp.text and '"INNERTUBE_API_KEY":"' in resp.text:
+        if re.search(r'"continuation"\s*:\s*"[^"]+"', resp.text) and re.search(r'"INNERTUBE_API_KEY"\s*:\s*"[^"]+"', resp.text):
             return True
 
         # Check 2: Watch page for live markers
@@ -484,14 +484,16 @@ def is_video_actually_live(video_id: str, api_manager: Optional[YouTubeApiManage
             return True
         if re.search(r'"isLive":\s*true', w_resp.text):
             return True
-        if '<meta itemprop="isLiveBroadcast" content="True">' in w_resp.text:
+        if '<meta itemprop="isLiveBroadcast" content="True">' in w_resp.text or '<meta itemprop="isLiveBroadcast" content="true">' in w_resp.text:
             return True
         if '"BADGE_STYLE_TYPE_LIVE_NOW"' in w_resp.text:
+            return True
+        if re.search(r'"isLiveContent":\s*true', w_resp.text):
             return True
     except Exception as e:
         log.debug(f"Web live check error for {video_id}: {e}")
 
-    # Check 3: Official API fallback if available
+    # Check 3: Official API fallback if available (costs only 1 quota unit via videos().list)
     if api_manager and api_manager.has_keys:
         try:
             status, _ = get_stream_status_api(api_manager, video_id)
@@ -540,22 +542,61 @@ def is_video_from_channel(
                 m = re.search(r'"externalChannelId":"(UC[\w-]{22})"', resp.text)
             if not m:
                 m = re.search(r'"browseId":"(UC[\w-]{22})"', resp.text)
-            if m:
-                return m.group(1) == channel_id
+            if m and m.group(1) == channel_id:
+                return True
+            # Also check all matching channel IDs in watch page JSON
+            cids = set(re.findall(r'"(?:channelId|externalChannelId|browseId)":\s*"(UC[\w-]{22})"', resp.text))
+            if channel_id in cids:
+                return True
     except Exception as e:
         log.debug(f"Channel ownership verification error for {video_id}: {e}")
 
     return False
 
 
-def find_live_video_id_api(api_manager: YouTubeApiManager, channel_id: str) -> Optional[str]:
+def find_live_video_id_rss(channel_id: str, api_manager: Optional[YouTubeApiManager] = None) -> Optional[str]:
+    """
+    Zero-quota, datacenter-safe live stream detector via official YouTube XML RSS feed.
+    Channel ownership is 100% guaranteed as videos are published directly by the channel.
+    Returns live video_id or None.
+    """
+    if not channel_id:
+        return None
+    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    try:
+        resp = requests.get(url, headers=_WEB_HEADERS, timeout=10)
+        if not resp.ok:
+            return None
+        vids = [v.strip() for v in re.findall(r'<yt:videoId>([^<]+)</yt:videoId>', resp.text) if v.strip()]
+        # Check the newest uploads/broadcasts (first 4 entries)
+        for vid in vids[:4]:
+            if is_video_actually_live(vid, api_manager=api_manager):
+                log.info(f"Official YouTube RSS Feed identified active live stream: {vid}")
+                return vid
+    except Exception as e:
+        log.debug(f"RSS feed lookup error for channel {channel_id}: {e}")
+    return None
+
+
+_last_api_search_timestamp: float = 0.0
+API_SEARCH_COOLDOWN_SECONDS: float = 900.0  # 15 minutes to preserve 10,000 daily quota
+
+
+def find_live_video_id_api(api_manager: YouTubeApiManager, channel_id: str, force: bool = False) -> Optional[str]:
     """
     Official API search for active live broadcast strictly belonging to the channel.
-    Returns video_id or None.
+    Returns video_id or None. Throttled to prevent daily quota exhaustion (100 units/call).
     """
+    global _last_api_search_timestamp
+    now = time.time()
+    if not force and (now - _last_api_search_timestamp < API_SEARCH_COOLDOWN_SECONDS):
+        return None
+
     service = api_manager.get_service()
     if not service:
         return None
+
+    _last_api_search_timestamp = now
     try:
         response = service.search().list(
             part="id",
@@ -585,26 +626,23 @@ def find_candidate_video_id(
 ) -> Optional[str]:
     """
     Multi-tier live stream detector with strict channel ownership verification:
-    1. Official YouTube Data API first if configured and not quota-exhausted
-    2. Zero-quota web check on /channel/UC.../live and /@handle/live
-    3. Zero-quota web check on /channel/UC.../streams and /@handle/streams
+    0. Official YouTube RSS/Atom Feed (0 Quota, Cloud-Datacenter Safe, Instant)
+    1. Zero-quota web check on /channel/UC.../live and /@handle/live
+    2. Zero-quota web check on /channel/UC.../streams and /@handle/streams
+    3. Official YouTube Data API (quota-throttled to preserve 10k daily limit)
     """
-    # Strategy 1: Official YouTube Data API first if keys are available and not exhausted
-    if api_manager and api_manager.has_keys:
-        try:
-            api_vid = find_live_video_id_api(api_manager, channel_id)
-            if api_vid:
-                log.info(f"Found active live stream via Official API: {api_vid}")
-                return api_vid
-        except Exception as e:
-            if is_quota_exceeded_error(e):
-                api_manager.mark_quota_exhausted()
-            else:
-                log.debug(f"API search error: {e}")
+    # Strategy 0: Official YouTube RSS feed (fastest, zero-quota, never blocked on cloud hosts)
+    try:
+        rss_vid = find_live_video_id_rss(channel_id, api_manager=api_manager)
+        if rss_vid:
+            log.info(f"Found active live stream via YouTube RSS Feed for channel {channel_id}: {rss_vid}")
+            return rss_vid
+    except Exception as e:
+        log.debug(f"RSS feed live search error: {e}")
 
     candidate_ids = []
 
-    # Strategy 2: Check /live endpoints (both /channel/UC... and /@handle)
+    # Strategy 1: Check /live endpoints (both /channel/UC... and /@handle)
     target_bases = [f"https://www.youtube.com/channel/{channel_id}"]
     if channel_handle:
         clean_h = channel_handle if channel_handle.startswith("@") else f"@{channel_handle}"
@@ -640,7 +678,7 @@ def find_candidate_video_id(
             else:
                 log.info(f"Ignoring recommended live stream {vid} (does not belong to channel {channel_id})")
 
-    # Strategy 3: Check /streams endpoints
+    # Strategy 2: Check /streams endpoints
     streams_candidates = []
     for base in target_bases:
         streams_url = f"{base}/streams"
@@ -663,6 +701,19 @@ def find_candidate_video_id(
                 return vid
             else:
                 log.info(f"Ignoring non-channel live stream {vid}")
+
+    # Strategy 3: Official YouTube Data API (quota-throttled, only runs if strategies 0-2 yielded nothing)
+    if api_manager and api_manager.has_keys:
+        try:
+            api_vid = find_live_video_id_api(api_manager, channel_id)
+            if api_vid:
+                log.info(f"Found active live stream via Official API: {api_vid}")
+                return api_vid
+        except Exception as e:
+            if is_quota_exceeded_error(e):
+                api_manager.mark_quota_exhausted()
+            else:
+                log.debug(f"API search error: {e}")
 
     return None
 

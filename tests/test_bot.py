@@ -293,6 +293,47 @@ class TestKeepAliveWebDashboard(unittest.TestCase):
         self.assertIn("state", data)
         self.assertIn("keywords", data)
 
+    def test_get_debug_json(self):
+        resp = self.client.get("/debug")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("state", data)
+        self.assertIn("api_keys_count", data)
+
+
+class TestRssFeedDetection(unittest.TestCase):
+    def test_rss_feed_parses_live_video(self):
+        from yt_live_chat_alert import find_live_video_id_rss
+        sample_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+            <entry>
+                <yt:videoId>LIVE_VID_123</yt:videoId>
+                <title>Live Stream Title</title>
+            </entry>
+            <entry>
+                <yt:videoId>OLD_VID_456</yt:videoId>
+                <title>Old Stream Title</title>
+            </entry>
+        </feed>"""
+        mock_resp = mock.MagicMock()
+        mock_resp.ok = True
+        mock_resp.text = sample_xml
+
+        with mock.patch("requests.get", return_value=mock_resp):
+            with mock.patch("yt_live_chat_alert.is_video_actually_live", side_effect=lambda vid, **kwargs: vid == "LIVE_VID_123"):
+                found = find_live_video_id_rss("UC_test_123")
+                self.assertEqual(found, "LIVE_VID_123")
+
+    def test_rss_feed_returns_none_when_empty_or_offline(self):
+        from yt_live_chat_alert import find_live_video_id_rss
+        mock_resp = mock.MagicMock()
+        mock_resp.ok = True
+        mock_resp.text = "<feed></feed>"
+
+        with mock.patch("requests.get", return_value=mock_resp):
+            found = find_live_video_id_rss("UC_test_123")
+            self.assertIsNone(found)
+
 
 if __name__ == "__main__":
     unittest.main()
