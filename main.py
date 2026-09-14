@@ -231,7 +231,7 @@ def start_services():
         log.info(f"Starting Daily Automation Scheduler ({daily_scheduler.start_time_str} - {daily_scheduler.stop_time_str} {daily_scheduler.timezone_str})...")
         daily_scheduler.start()
 
-    # 4. Auto-start bot on boot if requested
+    # 4. Auto-start bot on boot if requested or currently within scheduled hours
     auto_start = os.environ.get("AUTO_START_BOT", "false").strip().lower() in ("true", "1", "yes")
     if auto_start:
         if FAVORITE_CHANNEL:
@@ -239,6 +239,16 @@ def start_services():
             bot.start()
         else:
             log.warning("AUTO_START_BOT is true, but YT_CHANNEL is not set. Waiting for 'init' command.")
+    elif daily_scheduler.enabled:
+        now = daily_scheduler.get_current_time()
+        if daily_scheduler.start_time <= now.time() < daily_scheduler.stop_time:
+            log.info(
+                f"Auto-starting bot on boot because current time ({now.strftime('%I:%M %p')}) "
+                f"is within active daily schedule window ({daily_scheduler.start_time_str} - {daily_scheduler.stop_time_str} {daily_scheduler.timezone_str})..."
+            )
+            bot.start()
+        else:
+            log.info("Bot is in on-demand mode. Send 'init' in your ntfy topic to start monitoring!")
     else:
         log.info("Bot is in on-demand mode. Send 'init' in your ntfy topic to start monitoring!")
 
