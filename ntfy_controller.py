@@ -53,7 +53,11 @@ class NtfyController:
         self.bot = bot_instance
         self.topic = (topic or NTFY_TOPIC).strip()
         env_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
-        self.server_url = (server_url or env_server).rstrip("/")
+        cand = (server_url or env_server).rstrip("/")
+        if "adminforge.de" in cand:
+            self.server_url = "https://ntfy.sh"
+        else:
+            self.server_url = cand or "https://ntfy.sh"
         self.scheduler = scheduler
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()

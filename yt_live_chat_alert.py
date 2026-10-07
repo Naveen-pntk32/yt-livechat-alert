@@ -118,7 +118,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 # ntfy.sh notifications
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
-NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
+_raw_ntfy_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
+if "adminforge.de" in _raw_ntfy_server:
+    NTFY_SERVER = "https://ntfy.sh"
+else:
+    NTFY_SERVER = _raw_ntfy_server or "https://ntfy.sh"
 
 # WhatsApp notifications & bot control (Twilio API)
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
