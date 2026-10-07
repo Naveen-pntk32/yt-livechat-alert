@@ -97,11 +97,10 @@ class NtfyController:
         except Exception as e:
             log.warning(f"Root JSON publish failed: {e}. Trying direct topic publish fallback...")
 
-        # 2. Fallback: Direct topic publish with clean ASCII headers (prevents latin-1 UnicodeEncodeError)
+        # 2. Fallback: Direct topic publish with clean ASCII headers
         if not published:
             try:
                 topic_url = f"{self.server_url}/{self.topic}"
-                # Clean title to ASCII for safe HTTP header transit
                 clean_title = title.encode("ascii", "ignore").decode("ascii").strip() or "YouTube Alert Bot"
                 headers = {
                     "Title": clean_title,
@@ -322,9 +321,9 @@ class NtfyController:
         log.info(f"Connecting to ntfy listener for topic: '{self.topic}' on {self.server_url}")
         poll_url = f"{self.server_url}/{self.topic}/json"
 
-        # Initial catch-up on boot: populate seen_ids and process any command sent in the last 45s
+        # Initial catch-up on boot: query all recent messages to establish cursor and check for recent commands
         try:
-            resp = requests.get(poll_url, params={"poll": "1", "since": "60s"}, timeout=8)
+            resp = requests.get(poll_url, params={"poll": "1", "since": "all"}, timeout=8)
             if resp.ok and resp.text.strip():
                 now = time.time()
                 for line in resp.text.strip().split("\n"):
@@ -339,8 +338,8 @@ class NtfyController:
                             self.seen_ids.add(msg_id)
                             if event == "message":
                                 self.last_id = msg_id
-                        # Process if sent in the last 45 seconds before boot
-                        if event == "message" and (now - msg_time) <= 45:
+                        # Process if sent in the last 120 seconds before boot
+                        if event == "message" and (now - msg_time) <= 120:
                             msg_text = data.get("message", "").strip()
                             msg_title = data.get("title", "")
                             msg_tags = data.get("tags", [])
@@ -352,14 +351,14 @@ class NtfyController:
         except Exception as e:
             log.debug(f"Startup ntfy catch-up check: {e}")
 
-        log.info(f"ntfy poller active on '{self.topic}'. Waiting for commands (type 'status' or 'init')...")
+        log.info(f"ntfy poller active on '{self.topic}'. Cursor last_id='{self.last_id}'. Waiting for commands...")
 
         while not self._stop_event.is_set():
             params = {"poll": "1"}
             if self.last_id:
                 params["since"] = self.last_id
             else:
-                params["since"] = "30s"
+                params["since"] = "60s"
 
             try:
                 resp = requests.get(poll_url, params=params, timeout=10)
@@ -373,13 +372,12 @@ class NtfyController:
                             event = data.get("event")
 
                             if msg_id:
+                                self.last_id = msg_id
                                 if msg_id in self.seen_ids:
                                     continue
                                 self.seen_ids.add(msg_id)
                                 if len(self.seen_ids) > 2000:
                                     self.seen_ids = set(list(self.seen_ids)[-1000:])
-                                if event == "message":
-                                    self.last_id = msg_id
 
                             if event != "message":
                                 continue

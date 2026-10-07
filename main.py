@@ -17,6 +17,7 @@ import sys
 import time
 import signal
 import logging
+import requests
 from flask import Flask, Response, jsonify, request
 
 from yt_live_chat_alert import (
