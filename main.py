@@ -265,6 +265,15 @@ def debug_ntfy():
         except Exception as e:
             res["cmd_error"] = str(e)
 
+    # Test direct publish if ?test_pub=1 provided
+    test_pub = request.args.get("test_pub")
+    if test_pub:
+        res["test_pub_result"] = ntfy_controller.publish_response(
+            message=f"Manual test ping from debug endpoint at {time.strftime('%X')}",
+            title="🔍 Bot Test Ping",
+            priority=4,
+        )
+
     return jsonify(res)
 
 

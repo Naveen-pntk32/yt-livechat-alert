@@ -101,6 +101,11 @@ class NtfyController:
             log.info(f"Published response via root JSON to ntfy '{self.topic}': status={resp.status_code}")
             if resp.ok:
                 published = True
+            elif resp.status_code in (401, 403) and auth_token:
+                log.warning(f"ntfy server returned HTTP {resp.status_code} with auth token. Retrying without Authorization...")
+                resp = requests.post(self.server_url, json=payload, timeout=10)
+                if resp.ok:
+                    published = True
         except Exception as e:
             log.warning(f"Root JSON publish failed: {e}. Trying direct topic publish fallback...")
 
@@ -123,6 +128,11 @@ class NtfyController:
                 log.info(f"Published direct response to ntfy '{self.topic}': status={resp.status_code}")
                 if resp.ok:
                     published = True
+                elif resp.status_code in (401, 403) and auth_token:
+                    headers.pop("Authorization", None)
+                    resp = requests.post(topic_url, data=message.encode("utf-8"), headers=headers, timeout=10)
+                    if resp.ok:
+                        published = True
                 elif resp.status_code == 429:
                     log.warning(f"ntfy rate-limited (HTTP 429): {resp.text}")
             except Exception as e:

@@ -956,6 +956,11 @@ def _dispatch_ntfy_payload(
             if resp.ok:
                 log.info(f"ntfy alert sent to {srv}.")
                 sent = True
+            elif resp.status_code in (401, 403) and auth_token:
+                resp = requests.post(srv, json=payload, timeout=5)
+                if resp.ok:
+                    log.info(f"ntfy alert sent to {srv} without token.")
+                    sent = True
         except Exception as error:
             log.warning(f"ntfy JSON alert to {srv} failed: {error}")
 
@@ -976,6 +981,11 @@ def _dispatch_ntfy_payload(
                 resp = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=5)
                 if resp.ok:
                     log.info(f"ntfy alert direct fallback sent to {srv}.")
+                elif resp.status_code in (401, 403) and auth_token:
+                    headers.pop("Authorization", None)
+                    resp = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=5)
+                    if resp.ok:
+                        log.info(f"ntfy alert direct fallback sent to {srv} without token.")
             except Exception as error:
                 log.warning(f"ntfy alert fallback to {srv} failed: {error}")
 
