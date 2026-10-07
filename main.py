@@ -104,8 +104,9 @@ def health_dashboard():
     else:
         stream_badge = '<span style="background:#6b7280;color:#fff;padding:2px 8px;border-radius:4px;">Offline</span>'
 
+    ntfy_url = f"{ntfy_controller.server_url}/{ntfy_controller.topic}"
     ntfy_status = (
-        f'<span style="color:#10b981;">Active ({ntfy_controller.topic} on {ntfy_controller.server_url})</span>'
+        f'<a href="{ntfy_url}" target="_blank" style="color:#10b981;text-decoration:underline;font-weight:600;">Active ({ntfy_controller.topic} on {ntfy_controller.server_url}) ↗</a>'
         if ntfy_controller.is_running
         else f'<span style="color:#f59e0b;">Configured ({ntfy_controller.topic})</span>'
         if ntfy_controller.is_configured
@@ -259,7 +260,7 @@ def debug_ntfy():
     res["sock_telegram_443"] = test_ipv4("api.telegram.org", 443)
 
     # 3. Test HTTP probes (short 3s timeouts)
-    for probe_url in ["http://ntfy.sh", "https://ntfy.sh", "http://ntfy.adminforge.de", "https://ntfy.tedomum.fr"]:
+    for probe_url in ["https://ntfy.tedomum.fr", "http://ntfy.sh", "https://ntfy.sh", "http://ntfy.adminforge.de"]:
         key = f"http_{probe_url.replace('://', '_').replace('.', '_')}"
         try:
             t_p = time.time()

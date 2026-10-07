@@ -118,11 +118,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 # ntfy.sh notifications
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
-_raw_ntfy_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
-if "adminforge.de" in _raw_ntfy_server:
-    NTFY_SERVER = "https://ntfy.sh"
+_raw_ntfy_server = os.environ.get("NTFY_SERVER", "").strip().rstrip("/")
+if not _raw_ntfy_server or "adminforge.de" in _raw_ntfy_server or "ntfy.sh" in _raw_ntfy_server:
+    NTFY_SERVER = "https://ntfy.tedomum.fr"
 else:
-    NTFY_SERVER = _raw_ntfy_server or "https://ntfy.sh"
+    NTFY_SERVER = _raw_ntfy_server
 
 # WhatsApp notifications & bot control (Twilio API)
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
@@ -931,67 +931,47 @@ def _dispatch_ntfy_payload(
     tags: Optional[List[str]] = None,
     click: Optional[str] = None,
 ) -> None:
-    """Dispatches ntfy notification with auto-mirroring/failover to official ntfy.sh."""
+    """Dispatches ntfy notification with reliable primary delivery and background mirroring."""
     if not NTFY_TOPIC:
         return
 
     tags_list = tags or []
-    servers = [NTFY_SERVER]
-    if NTFY_SERVER != "https://ntfy.sh":
-        servers.append("https://ntfy.sh")
-
     auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip() or "tk_h4ulqyctrc6110279nh9k9w414mmk"
 
-    for srv in servers:
-        sent = False
-        # 1. Primary: Root JSON POST
-        try:
-            json_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
-            payload = {
-                "topic": NTFY_TOPIC,
-                "title": title,
-                "message": message,
-                "priority": priority,
-                "tags": tags_list,
-            }
-            if click:
-                payload["click"] = click
-            resp = requests.post(srv, json=payload, headers=json_headers, timeout=5)
-            if resp.ok:
-                log.info(f"ntfy alert sent to {srv}.")
-                sent = True
-            elif resp.status_code in (401, 403) and auth_token:
-                resp = requests.post(srv, json=payload, timeout=5)
-                if resp.ok:
-                    log.info(f"ntfy alert sent to {srv} without token.")
-                    sent = True
-        except Exception as error:
-            log.warning(f"ntfy JSON alert to {srv} failed: {error}")
+    payload = {
+        "topic": NTFY_TOPIC,
+        "title": title,
+        "message": message,
+        "priority": priority,
+        "tags": tags_list,
+    }
+    if click:
+        payload["click"] = click
 
-        # 2. Fallback: Direct topic POST
-        if not sent:
+    # 1. Primary: Deliver immediately to the configured / reachable server
+    primary_srv = NTFY_SERVER
+    try:
+        headers = {"Authorization": f"Bearer {auth_token}"} if ("ntfy.sh" in primary_srv and auth_token) else {}
+        resp = requests.post(primary_srv, json=payload, headers=headers, timeout=5)
+        if resp.ok:
+            log.info(f"ntfy alert sent to primary server {primary_srv}.")
+        elif resp.status_code in (401, 403) and auth_token:
+            resp2 = requests.post(primary_srv, json=payload, timeout=5)
+            if resp2.ok:
+                log.info(f"ntfy alert sent to {primary_srv} without auth.")
+    except Exception as e:
+        log.warning(f"ntfy primary alert to {primary_srv} failed: {e}")
+
+    # 2. Asynchronous background mirror to backup servers (never delays live chat processing)
+    backup_servers = [s for s in ("https://ntfy.tedomum.fr", "https://ntfy.sh", "https://ntfy.adminforge.de") if s != primary_srv]
+    def _mirror():
+        for srv in backup_servers:
             try:
-                url = f"{srv.rstrip('/')}/{NTFY_TOPIC}"
-                clean_title = title.encode("ascii", "ignore").decode("ascii").strip() or "Live Chat Alert"
-                headers = {
-                    "Title": clean_title,
-                    "Priority": str(priority),
-                    "Tags": ",".join(tags_list),
-                }
-                if click:
-                    headers["Click"] = click
-                if auth_token:
-                    headers["Authorization"] = f"Bearer {auth_token}"
-                resp = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=5)
-                if resp.ok:
-                    log.info(f"ntfy alert direct fallback sent to {srv}.")
-                elif resp.status_code in (401, 403) and auth_token:
-                    headers.pop("Authorization", None)
-                    resp = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=5)
-                    if resp.ok:
-                        log.info(f"ntfy alert direct fallback sent to {srv} without token.")
-            except Exception as error:
-                log.warning(f"ntfy alert fallback to {srv} failed: {error}")
+                b_headers = {"Authorization": f"Bearer {auth_token}"} if ("ntfy.sh" in srv and auth_token) else {}
+                requests.post(srv, json=payload, headers=b_headers, timeout=3)
+            except Exception:
+                pass
+    threading.Thread(target=_mirror, name="ntfy_mirror", daemon=True).start()
 
 
 def send_ntfy_alert(author: str, keyword: str, text: str, video_id: str) -> None:

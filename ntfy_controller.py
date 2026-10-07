@@ -52,12 +52,12 @@ class NtfyController:
     ):
         self.bot = bot_instance
         self.topic = (topic or NTFY_TOPIC).strip()
-        env_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
+        env_server = os.environ.get("NTFY_SERVER", "").strip().rstrip("/")
         cand = (server_url or env_server).rstrip("/")
-        if "adminforge.de" in cand:
-            self.server_url = "https://ntfy.sh"
+        if not cand or "adminforge.de" in cand or "ntfy.sh" in cand:
+            self.server_url = "https://ntfy.tedomum.fr"
         else:
-            self.server_url = cand or "https://ntfy.sh"
+            self.server_url = cand
         self.scheduler = scheduler
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -142,22 +142,27 @@ class NtfyController:
             except Exception as e:
                 log.error(f"Failed direct fallback publish to ntfy topic {self.topic}: {e}")
 
-        # 3. Mirror confirmation to official ntfy.sh if configured server is custom
-        if self.server_url != "https://ntfy.sh":
-            try:
-                requests.post(
-                    "https://ntfy.sh",
-                    json={
-                        "topic": self.topic,
-                        "title": title,
-                        "message": message,
-                        "priority": priority,
-                        "tags": tags_list,
-                    },
-                    timeout=4,
-                )
-            except Exception:
-                pass
+        # 3. Mirror confirmation to backup ntfy servers asynchronously
+        backup_servers = [s for s in ("https://ntfy.tedomum.fr", "https://ntfy.sh", "https://ntfy.adminforge.de") if s != self.server_url]
+        def _bg_reply_mirror():
+            for b_srv in backup_servers:
+                try:
+                    b_headers = {"Authorization": f"Bearer {auth_token}"} if ("ntfy.sh" in b_srv and auth_token) else {}
+                    requests.post(
+                        b_srv,
+                        json={
+                            "topic": self.topic,
+                            "title": title,
+                            "message": message,
+                            "priority": priority,
+                            "tags": tags_list,
+                        },
+                        headers=b_headers,
+                        timeout=3,
+                    )
+                except Exception:
+                    pass
+        threading.Thread(target=_bg_reply_mirror, daemon=True).start()
 
         # 4. Mirror confirmation to Telegram if configured
         tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -359,15 +364,15 @@ class NtfyController:
         log.info(f"Connecting to ntfy listener for topic: '{self.topic}' on {self.server_url}")
         poll_url = f"{self.server_url}/{self.topic}/json"
 
-        # Check server reachability; auto-switch to official https://ntfy.sh if configured server times out or is unreachable
+        # Check server reachability; auto-switch to https://ntfy.tedomum.fr if configured server times out or is unreachable
         try:
             test_resp = requests.get(poll_url, params={"poll": "1", "since": "10s"}, timeout=4)
             if not test_resp.ok and test_resp.status_code != 404:
                 raise ConnectionError(f"HTTP {test_resp.status_code}")
         except Exception as reach_err:
-            if self.server_url != "https://ntfy.sh":
-                log.warning(f"ntfy server '{self.server_url}' is unreachable ({reach_err}). Auto-switching to official 'https://ntfy.sh'...")
-                self.server_url = "https://ntfy.sh"
+            if self.server_url != "https://ntfy.tedomum.fr":
+                log.warning(f"ntfy server '{self.server_url}' is unreachable ({reach_err}). Auto-switching to 'https://ntfy.tedomum.fr'...")
+                self.server_url = "https://ntfy.tedomum.fr"
                 poll_url = f"{self.server_url}/{self.topic}/json"
 
         auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip() or "tk_h4ulqyctrc6110279nh9k9w414mmk"
