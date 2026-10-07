@@ -230,13 +230,31 @@ def debug_ntfy():
         g = requests.get(
             f"{ntfy_controller.server_url}/{ntfy_controller.topic}/json",
             params={"poll": "1", "since": "30s"},
-            timeout=6,
+            timeout=4,
         )
         res["outbound_get_status"] = g.status_code
         res["outbound_get_ms"] = round((time.time() - t0) * 1000, 1)
         res["outbound_get_bytes"] = len(g.content)
     except Exception as e:
         res["outbound_get_error"] = str(e)
+
+    # Test official ntfy.sh server reachability
+    try:
+        t_sh = time.time()
+        g_sh = requests.get("https://ntfy.sh/v1/info", timeout=4)
+        res["official_ntfy_sh_status"] = g_sh.status_code
+        res["official_ntfy_sh_ms"] = round((time.time() - t_sh) * 1000, 1)
+    except Exception as e:
+        res["official_ntfy_sh_error"] = str(e)
+
+    # Test telegram reachability
+    try:
+        t_tg = time.time()
+        g_tg = requests.get("https://api.telegram.org", timeout=4)
+        res["telegram_api_status"] = g_tg.status_code
+        res["telegram_api_ms"] = round((time.time() - t_tg) * 1000, 1)
+    except Exception as e:
+        res["telegram_api_error"] = str(e)
 
     # Test executing a command on demand if ?cmd=... provided
     test_cmd = request.args.get("cmd")
