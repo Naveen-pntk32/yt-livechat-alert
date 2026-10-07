@@ -273,6 +273,19 @@ def debug_ntfy():
             title="🔍 Bot Test Ping",
             priority=4,
         )
+        try:
+            r1 = requests.post(ntfy_controller.server_url, json={"topic": ntfy_controller.topic, "message": "debug root"}, timeout=4)
+            res["r1_status"] = r1.status_code
+            res["r1_text"] = r1.text
+        except Exception as e:
+            res["r1_err"] = str(e)
+
+        try:
+            r2 = requests.post(f"{ntfy_controller.server_url}/{ntfy_controller.topic}", data="debug direct", timeout=4)
+            res["r2_status"] = r2.status_code
+            res["r2_text"] = r2.text
+        except Exception as e:
+            res["r2_err"] = str(e)
 
     return jsonify(res)
 
