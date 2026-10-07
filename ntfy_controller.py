@@ -50,7 +50,9 @@ class NtfyController:
         self.scheduler = scheduler
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self.last_handled_time = time.time() - 5.0  # Only process new messages after startup
+        self.seen_ids = set()
+        self.last_id: Optional[str] = None
+        self.poll_interval = float(os.environ.get("NTFY_POLL_INTERVAL", "2.0"))
 
     @property
     def is_configured(self) -> bool:
@@ -291,103 +293,120 @@ class NtfyController:
                 2,
             )
 
-    def _stream_loop(self) -> None:
-        """Continuous stream subscriber to ntfy JSON endpoint with auto-reconnect."""
-        log.info(f"Connecting to ntfy stream listener for topic: '{self.topic}' on {self.server_url}")
-        stream_url = f"{self.server_url}/{self.topic}/json"
-        last_id = None
-        last_timestamp = int(time.time()) - 5
-        seen_ids = set()
+    def _execute_and_reply(self, msg_text: str) -> None:
+        """Parses and executes a command, then dispatches the reply."""
+        try:
+            res = self.handle_command(msg_text)
+            if res:
+                reply_body, reply_title, reply_priority = res
+                click_url = None
+                if hasattr(self.bot, "get_status"):
+                    b_status = self.bot.get_status()
+                    if b_status.get("is_stream_live"):
+                        click_url = b_status.get("stream_url")
 
-        while not self._stop_event.is_set():
-            try:
-                # Use last_id if available, otherwise catch up from last_timestamp (seconds)
-                params = {"since": last_id} if last_id else {"since": str(int(last_timestamp))}
+                self.publish_response(
+                    message=reply_body,
+                    title=reply_title,
+                    priority=reply_priority,
+                    click=click_url,
+                )
+        except Exception as cmd_err:
+            log.error(f"Error handling ntfy command '{msg_text}': {cmd_err}", exc_info=True)
 
-                # Timeout: 15s connect, 60s read. ntfy emits keepalive every 45s,
-                # so 60s read timeout detects dropped connections reliably.
-                resp = requests.get(stream_url, params=params, stream=True, timeout=(15, 60))
+    def _listen_loop(self) -> None:
+        """
+        Continuous, highly resilient command poller for ntfy topic.
+        Never hangs on dead TCP connections or silent proxy timeouts.
+        """
+        log.info(f"Connecting to ntfy listener for topic: '{self.topic}' on {self.server_url}")
+        poll_url = f"{self.server_url}/{self.topic}/json"
 
-                if not resp.ok:
-                    log.warning(f"ntfy stream returned HTTP {resp.status_code}. Retrying in 5s...")
-                    if self._stop_event.wait(5.0):
-                        break
-                    continue
-
-                log.info(f"ntfy stream connection active on '{self.topic}'. Waiting for commands (type 'status' or 'init')...")
-
-                for line in resp.iter_lines(chunk_size=1):
-                    if self._stop_event.is_set():
-                        break
+        # Initial catch-up on boot: populate seen_ids and process any command sent in the last 45s
+        try:
+            resp = requests.get(poll_url, params={"poll": "1", "since": "60s"}, timeout=8)
+            if resp.ok and resp.text.strip():
+                now = time.time()
+                for line in resp.text.strip().split("\n"):
                     if not line:
                         continue
-
                     try:
-                        data = json.loads(line.decode("utf-8"))
+                        data = json.loads(line)
+                        msg_id = data.get("id")
+                        event = data.get("event")
+                        msg_time = data.get("time", 0)
+                        if msg_id:
+                            self.seen_ids.add(msg_id)
+                            if event == "message":
+                                self.last_id = msg_id
+                        # Process if sent in the last 45 seconds before boot
+                        if event == "message" and (now - msg_time) <= 45:
+                            msg_text = data.get("message", "").strip()
+                            msg_title = data.get("title", "")
+                            msg_tags = data.get("tags", [])
+                            if msg_text and not self.is_bot_alert_message(msg_text, title=msg_title, tags=msg_tags):
+                                log.info(f"Processing recent startup ntfy command: '{msg_text}' (id={msg_id})")
+                                self._execute_and_reply(msg_text)
                     except Exception:
-                        continue
+                        pass
+        except Exception as e:
+            log.debug(f"Startup ntfy catch-up check: {e}")
 
-                    msg_id = data.get("id")
-                    msg_time = data.get("time")
-                    if msg_time and isinstance(msg_time, (int, float)):
-                        last_timestamp = max(last_timestamp, int(msg_time))
+        log.info(f"ntfy poller active on '{self.topic}'. Waiting for commands (type 'status' or 'init')...")
 
-                    if msg_id:
-                        if msg_id in seen_ids:
+        while not self._stop_event.is_set():
+            params = {"poll": "1"}
+            if self.last_id:
+                params["since"] = self.last_id
+            else:
+                params["since"] = "30s"
+
+            try:
+                resp = requests.get(poll_url, params=params, timeout=10)
+                if resp.ok and resp.text.strip():
+                    for line in resp.text.strip().split("\n"):
+                        if not line:
                             continue
-                        seen_ids.add(msg_id)
-                        last_id = msg_id
-                        if len(seen_ids) > 2000:
-                            seen_ids = set(list(seen_ids)[-1000:])
+                        try:
+                            data = json.loads(line)
+                            msg_id = data.get("id")
+                            event = data.get("event")
 
-                    event = data.get("event")
-                    if event != "message":
-                        continue
+                            if msg_id:
+                                if msg_id in self.seen_ids:
+                                    continue
+                                self.seen_ids.add(msg_id)
+                                if len(self.seen_ids) > 2000:
+                                    self.seen_ids = set(list(self.seen_ids)[-1000:])
+                                if event == "message":
+                                    self.last_id = msg_id
 
-                    msg_text = data.get("message", "").strip()
-                    msg_title = data.get("title", "")
-                    msg_tags = data.get("tags", [])
+                            if event != "message":
+                                continue
 
-                    # Skip alerts sent by the bot itself
-                    if self.is_bot_alert_message(msg_text, title=msg_title, tags=msg_tags):
-                        continue
+                            msg_text = data.get("message", "").strip()
+                            msg_title = data.get("title", "")
+                            msg_tags = data.get("tags", [])
 
-                    log.info(f"Processing ntfy command: '{msg_text}' (id={msg_id})")
-                    try:
-                        res = self.handle_command(msg_text)
-                        if res:
-                            reply_body = res[0]
-                            reply_title = res[1]
-                            reply_priority = res[2]
-                            click_url = None
-                            if hasattr(self.bot, "get_status"):
-                                b_status = self.bot.get_status()
-                                if b_status.get("is_stream_live"):
-                                    click_url = b_status.get("stream_url")
+                            if not msg_text or self.is_bot_alert_message(msg_text, title=msg_title, tags=msg_tags):
+                                continue
 
-                            self.publish_response(
-                                message=reply_body,
-                                title=reply_title,
-                                priority=reply_priority,
-                                click=click_url,
-                            )
-                    except Exception as cmd_err:
-                        log.error(f"Error handling ntfy command '{msg_text}': {cmd_err}", exc_info=True)
+                            log.info(f"Processing ntfy command: '{msg_text}' (id={msg_id})")
+                            self._execute_and_reply(msg_text)
 
-            except requests.Timeout:
-                log.debug("ntfy stream read timed out (connection quiet). Reconnecting...")
-                if self._stop_event.wait(1.0):
-                    break
+                        except Exception as err:
+                            log.debug(f"Error parsing ntfy message line: {err}")
+                elif resp.status_code == 404:
+                    self.last_id = None
             except requests.RequestException as e:
-                log.debug(f"ntfy stream disconnected ({e}). Reconnecting in 3s...")
-                if self._stop_event.wait(3.0):
-                    break
+                log.debug(f"ntfy poll error ({e}). Retrying...")
             except Exception as e:
-                log.error(f"Unexpected error in ntfy stream listener: {e}", exc_info=True)
-                if self._stop_event.wait(5.0):
-                    break
+                log.warning(f"Unexpected error in ntfy poll: {e}")
 
-        log.info("ntfy stream listener exited.")
+            if self._stop_event.wait(self.poll_interval):
+                break
+
+        log.info("ntfy listener loop exited.")
 
     def start(self) -> bool:
         """Starts the ntfy listener in a background daemon thread."""
@@ -399,7 +418,7 @@ class NtfyController:
             return False
 
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._stream_loop, name="ntfy_stream_poller", daemon=True)
+        self._thread = threading.Thread(target=self._listen_loop, name="ntfy_poller", daemon=True)
         self._thread.start()
         log.info(f"ntfy Two-Way Controller is ACTIVE on topic: '{self.topic}' ({self.server_url})")
         return True

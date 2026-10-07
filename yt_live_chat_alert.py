@@ -1216,6 +1216,8 @@ def watch_chat_innertube(
         seen_message_order = deque()
 
         log.info("Live chat connection established (Live Chat mode). Listening for messages in real time...")
+        consecutive_errors = 0
+        empty_cont_count = 0
 
         while True:
             if stop_event and stop_event.is_set():
@@ -1223,13 +1225,36 @@ def watch_chat_innertube(
                 return False
 
             payload = {"context": context, "continuation": continuation}
-            chat_resp = session.post(post_url, json=payload, timeout=10)
+            try:
+                chat_resp = session.post(post_url, json=payload, timeout=10)
+            except Exception as net_err:
+                consecutive_errors += 1
+                log.warning(f"Innertube chat network error (attempt {consecutive_errors}/3): {net_err}")
+                if consecutive_errors >= 3:
+                    return False
+                if stop_event and stop_event.wait(min(10.0, 2.0 * consecutive_errors)):
+                    return False
+                continue
 
             if chat_resp.status_code != 200:
-                log.warning(f"Innertube chat API returned HTTP {chat_resp.status_code}")
-                return False
+                consecutive_errors += 1
+                log.warning(f"Innertube chat API returned HTTP {chat_resp.status_code} (attempt {consecutive_errors}/3)")
+                if consecutive_errors >= 3:
+                    return False
+                if stop_event and stop_event.wait(min(10.0, 2.0 * consecutive_errors)):
+                    return False
+                continue
 
-            data = chat_resp.json()
+            consecutive_errors = 0
+
+            try:
+                data = chat_resp.json()
+            except Exception as parse_err:
+                log.warning(f"Failed to parse Innertube JSON response: {parse_err}")
+                if stop_event and stop_event.wait(2.0):
+                    return False
+                continue
+
             cont_contents = data.get("continuationContents", {}).get("liveChatContinuation", {})
             actions = cont_contents.get("actions", [])
 
@@ -1270,9 +1295,15 @@ def watch_chat_innertube(
             # Extract continuation for next batch
             conts = cont_contents.get("continuations", [])
             if not conts:
-                log.info("Live chat continuation ended (stream over).")
-                return True
+                empty_cont_count += 1
+                if empty_cont_count >= 3:
+                    log.info("Live chat continuation ended (stream over).")
+                    return True
+                if stop_event and stop_event.wait(2.0):
+                    return False
+                continue
 
+            empty_cont_count = 0
             cont_data = conts[0].get("invalidationContinuationData") or conts[0].get("timedContinuationData", {})
             continuation = cont_data.get("continuation")
             timeout_ms = cont_data.get("timeoutMs")
@@ -1281,7 +1312,7 @@ def watch_chat_innertube(
                 log.info("No further chat continuation token. Stream is over.")
                 return True
 
-            poll_delay = min(1.5, max(1.0, timeout_ms / 1000.0)) if timeout_ms else 1.5
+            poll_delay = min(5.0, max(1.0, timeout_ms / 1000.0)) if timeout_ms else 1.5
             if stop_event:
                 if stop_event.wait(poll_delay):
                     log.info("Chat monitor stopped during poll delay.")
