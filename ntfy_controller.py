@@ -20,7 +20,14 @@ import logging
 import threading
 from typing import Optional, List, Dict, Any, Tuple
 
+import socket
 import requests
+
+try:
+    import urllib3.util.connection as urllib3_cn
+    urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
 
 from yt_live_chat_alert import (
     LiveChatAlertBot,

@@ -17,7 +17,15 @@ import sys
 import time
 import signal
 import logging
+import socket
 import requests
+
+try:
+    import urllib3.util.connection as urllib3_cn
+    urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
+
 from flask import Flask, Response, jsonify, request
 
 from yt_live_chat_alert import (

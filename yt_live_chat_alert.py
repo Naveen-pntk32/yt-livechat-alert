@@ -46,7 +46,15 @@ import concurrent.futures
 from typing import Optional, Tuple, List, Dict, Callable, Any, Union
 from urllib.parse import urlparse, parse_qs
 
+import socket
 import requests
+
+# Ensure requests and urllib3 always use IPv4 (prevents [Errno 101] Network is unreachable on Docker/cloud hosts without IPv6 routing)
+try:
+    import urllib3.util.connection as urllib3_cn
+    urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
