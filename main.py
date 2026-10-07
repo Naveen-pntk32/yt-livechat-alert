@@ -234,45 +234,44 @@ def debug_ntfy():
     except Exception as e:
         res["egress_ip_error"] = str(e)
 
-    # 2. Raw socket connection tests
-    for target_host in ["ntfy.sh", "ntfy.adminforge.de", "api.telegram.org"]:
-        key = f"socket_{target_host.replace('.', '_')}"
+    def test_ipv4(host, port, timeout=2.5):
+        target_ip = host
         try:
+            infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            if not infos:
+                return "FAILED: no IPv4"
+            target_ip = infos[0][4][0]
             s_t0 = time.time()
-            s = socket.create_connection((target_host, 443), timeout=4)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((target_ip, port))
             s.close()
-            res[key] = f"OK in {round((time.time() - s_t0) * 1000, 1)}ms"
+            return f"OK ({target_ip}:{port}) in {round((time.time() - s_t0) * 1000, 1)}ms"
         except Exception as e:
-            res[key] = f"FAILED: {e}"
+            return f"FAILED ({target_ip}:{port}): {e}"
 
-    # 3. Test authenticated GET on configured server
-    try:
-        t0 = time.time()
-        g = requests.get(
-            f"{ntfy_controller.server_url}/{ntfy_controller.topic}/json",
-            params={"poll": "1", "since": "30s"},
-            headers=auth_headers,
-            timeout=6,
-        )
-        res["outbound_get_status"] = g.status_code
-        res["outbound_get_ms"] = round((time.time() - t0) * 1000, 1)
-        res["outbound_get_bytes"] = len(g.content)
-    except Exception as e:
-        res["outbound_get_error"] = str(e)
+    # 2. Test IPv4 socket connections
+    res["sock_ntfy_sh_443"] = test_ipv4("ntfy.sh", 443)
+    res["sock_ntfy_sh_80"] = test_ipv4("ntfy.sh", 80)
+    res["sock_adminforge_443"] = test_ipv4("ntfy.adminforge.de", 443)
+    res["sock_adminforge_80"] = test_ipv4("ntfy.adminforge.de", 80)
+    res["sock_tedomum_443"] = test_ipv4("ntfy.tedomum.fr", 443)
+    res["sock_telegram_443"] = test_ipv4("api.telegram.org", 443)
 
-    # 4. Test official ntfy.sh with auth
-    try:
-        t_sh = time.time()
-        g_sh = requests.get(
-            f"https://ntfy.sh/{ntfy_controller.topic}/json",
-            params={"poll": "1", "since": "30s"},
-            headers=auth_headers,
-            timeout=6,
-        )
-        res["ntfy_sh_get_status"] = g_sh.status_code
-        res["ntfy_sh_get_ms"] = round((time.time() - t_sh) * 1000, 1)
-    except Exception as e:
-        res["ntfy_sh_get_error"] = str(e)
+    # 3. Test HTTP probes (short 3s timeouts)
+    for probe_url in ["http://ntfy.sh", "https://ntfy.sh", "http://ntfy.adminforge.de", "https://ntfy.tedomum.fr"]:
+        key = f"http_{probe_url.replace('://', '_').replace('.', '_')}"
+        try:
+            t_p = time.time()
+            p_r = requests.get(
+                f"{probe_url}/{ntfy_controller.topic}/json",
+                params={"poll": "1", "since": "10s"},
+                headers=auth_headers if "ntfy.sh" in probe_url else {},
+                timeout=3,
+            )
+            res[key] = f"Status {p_r.status_code} in {round((time.time() - t_p) * 1000, 1)}ms"
+        except Exception as e:
+            res[key] = f"ERR: {e}"
 
     # 5. Test telegram reachability
     try:
