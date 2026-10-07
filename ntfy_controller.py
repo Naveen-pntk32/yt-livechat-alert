@@ -82,7 +82,7 @@ class NtfyController:
             return False
 
         tags_list = tags or ["robot", "gear"]
-        auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip()
+        auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip() or "tk_h4ulqyctrc6110279nh9k9w414mmk"
         published = False
 
         # 1. Primary: Root JSON publish (safe for all Unicode/emojis, supported by ntfy)
@@ -366,9 +366,12 @@ class NtfyController:
                 self.server_url = "https://ntfy.sh"
                 poll_url = f"{self.server_url}/{self.topic}/json"
 
+        auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip() or "tk_h4ulqyctrc6110279nh9k9w414mmk"
+        poll_headers = {"Authorization": f"Bearer {auth_token}"} if (self.server_url == "https://ntfy.sh" and auth_token) else {}
+
         # Initial catch-up on boot: query all recent messages to establish cursor and check for recent commands
         try:
-            resp = requests.get(poll_url, params={"poll": "1", "since": "all"}, timeout=8)
+            resp = requests.get(poll_url, params={"poll": "1", "since": "all"}, headers=poll_headers, timeout=8)
             if resp.ok and resp.text.strip():
                 now = time.time()
                 for line in resp.text.strip().split("\n"):
@@ -406,7 +409,7 @@ class NtfyController:
                 params["since"] = "60s"
 
             try:
-                resp = requests.get(poll_url, params=params, timeout=10)
+                resp = requests.get(poll_url, params=params, headers=poll_headers, timeout=10)
                 if resp.ok and resp.text.strip():
                     for line in resp.text.strip().split("\n"):
                         if not line:
