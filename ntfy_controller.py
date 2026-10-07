@@ -63,7 +63,7 @@ class NtfyController:
         self._stop_event = threading.Event()
         self.seen_ids = set()
         self.last_id: Optional[str] = None
-        self.poll_interval = float(os.environ.get("NTFY_POLL_INTERVAL", "2.0"))
+        self.poll_interval = float(os.environ.get("NTFY_POLL_INTERVAL", "4.0"))
 
     @property
     def is_configured(self) -> bool:

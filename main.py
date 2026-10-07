@@ -224,13 +224,35 @@ def debug_ntfy():
         "server": ntfy_controller.server_url,
     }
 
-    # Test outbound GET from server environment
+    auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip() or "tk_h4ulqyctrc6110279nh9k9w414mmk"
+    auth_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+
+    # 1. Egress IP check
+    try:
+        ip_r = requests.get("https://api.ipify.org?format=json", timeout=4)
+        res["egress_ip"] = ip_r.json().get("ip")
+    except Exception as e:
+        res["egress_ip_error"] = str(e)
+
+    # 2. Raw socket connection tests
+    for target_host in ["ntfy.sh", "ntfy.adminforge.de", "api.telegram.org"]:
+        key = f"socket_{target_host.replace('.', '_')}"
+        try:
+            s_t0 = time.time()
+            s = socket.create_connection((target_host, 443), timeout=4)
+            s.close()
+            res[key] = f"OK in {round((time.time() - s_t0) * 1000, 1)}ms"
+        except Exception as e:
+            res[key] = f"FAILED: {e}"
+
+    # 3. Test authenticated GET on configured server
     try:
         t0 = time.time()
         g = requests.get(
             f"{ntfy_controller.server_url}/{ntfy_controller.topic}/json",
             params={"poll": "1", "since": "30s"},
-            timeout=4,
+            headers=auth_headers,
+            timeout=6,
         )
         res["outbound_get_status"] = g.status_code
         res["outbound_get_ms"] = round((time.time() - t0) * 1000, 1)
@@ -238,16 +260,21 @@ def debug_ntfy():
     except Exception as e:
         res["outbound_get_error"] = str(e)
 
-    # Test official ntfy.sh server reachability
+    # 4. Test official ntfy.sh with auth
     try:
         t_sh = time.time()
-        g_sh = requests.get("https://ntfy.sh/v1/info", timeout=4)
-        res["official_ntfy_sh_status"] = g_sh.status_code
-        res["official_ntfy_sh_ms"] = round((time.time() - t_sh) * 1000, 1)
+        g_sh = requests.get(
+            f"https://ntfy.sh/{ntfy_controller.topic}/json",
+            params={"poll": "1", "since": "30s"},
+            headers=auth_headers,
+            timeout=6,
+        )
+        res["ntfy_sh_get_status"] = g_sh.status_code
+        res["ntfy_sh_get_ms"] = round((time.time() - t_sh) * 1000, 1)
     except Exception as e:
-        res["official_ntfy_sh_error"] = str(e)
+        res["ntfy_sh_get_error"] = str(e)
 
-    # Test telegram reachability
+    # 5. Test telegram reachability
     try:
         t_tg = time.time()
         g_tg = requests.get("https://api.telegram.org", timeout=4)
@@ -256,7 +283,7 @@ def debug_ntfy():
     except Exception as e:
         res["telegram_api_error"] = str(e)
 
-    # Test executing a command on demand if ?cmd=... provided
+    # 6. Test executing a command on demand if ?cmd=... provided
     test_cmd = request.args.get("cmd")
     if test_cmd:
         try:
@@ -265,7 +292,7 @@ def debug_ntfy():
         except Exception as e:
             res["cmd_error"] = str(e)
 
-    # Test direct publish if ?test_pub=1 provided
+    # 7. Test direct publish if ?test_pub=1 provided
     test_pub = request.args.get("test_pub")
     if test_pub:
         res["test_pub_result"] = ntfy_controller.publish_response(
@@ -273,19 +300,6 @@ def debug_ntfy():
             title="🔍 Bot Test Ping",
             priority=4,
         )
-        try:
-            r1 = requests.post(ntfy_controller.server_url, json={"topic": ntfy_controller.topic, "message": "debug root"}, timeout=4)
-            res["r1_status"] = r1.status_code
-            res["r1_text"] = r1.text
-        except Exception as e:
-            res["r1_err"] = str(e)
-
-        try:
-            r2 = requests.post(f"{ntfy_controller.server_url}/{ntfy_controller.topic}", data="debug direct", timeout=4)
-            res["r2_status"] = r2.status_code
-            res["r2_text"] = r2.text
-        except Exception as e:
-            res["r2_err"] = str(e)
 
     return jsonify(res)
 
