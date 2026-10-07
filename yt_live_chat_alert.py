@@ -920,52 +920,80 @@ def send_telegram_alert(author: str, keyword: str, text: str, video_id: str) -> 
         log.error(f"Telegram alert failed: {error}")
 
 
-def send_ntfy_alert(author: str, keyword: str, text: str, video_id: str) -> None:
-    """Send high-priority alert to ntfy with direct click-action URL."""
+def _dispatch_ntfy_payload(
+    title: str,
+    message: str,
+    priority: int = 5,
+    tags: Optional[List[str]] = None,
+    click: Optional[str] = None,
+) -> None:
+    """Dispatches ntfy notification with auto-mirroring/failover to official ntfy.sh."""
     if not NTFY_TOPIC:
         return
 
+    tags_list = tags or []
+    servers = [NTFY_SERVER]
+    if NTFY_SERVER != "https://ntfy.sh":
+        servers.append("https://ntfy.sh")
+
+    auth_token = os.environ.get("NTFY_AUTH_TOKEN", "").strip()
+
+    for srv in servers:
+        sent = False
+        # 1. Primary: Root JSON POST
+        try:
+            json_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+            payload = {
+                "topic": NTFY_TOPIC,
+                "title": title,
+                "message": message,
+                "priority": priority,
+                "tags": tags_list,
+            }
+            if click:
+                payload["click"] = click
+            resp = requests.post(srv, json=payload, headers=json_headers, timeout=5)
+            if resp.ok:
+                log.info(f"ntfy alert sent to {srv}.")
+                sent = True
+        except Exception as error:
+            log.warning(f"ntfy JSON alert to {srv} failed: {error}")
+
+        # 2. Fallback: Direct topic POST
+        if not sent:
+            try:
+                url = f"{srv.rstrip('/')}/{NTFY_TOPIC}"
+                clean_title = title.encode("ascii", "ignore").decode("ascii").strip() or "Live Chat Alert"
+                headers = {
+                    "Title": clean_title,
+                    "Priority": str(priority),
+                    "Tags": ",".join(tags_list),
+                }
+                if click:
+                    headers["Click"] = click
+                if auth_token:
+                    headers["Authorization"] = f"Bearer {auth_token}"
+                resp = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=5)
+                if resp.ok:
+                    log.info(f"ntfy alert direct fallback sent to {srv}.")
+            except Exception as error:
+                log.warning(f"ntfy alert fallback to {srv} failed: {error}")
+
+
+def send_ntfy_alert(author: str, keyword: str, text: str, video_id: str) -> None:
+    """Send high-priority alert to ntfy with direct click-action URL."""
     author_display = format_author(author)
     stream_url = f"https://youtu.be/{video_id}"
     message_body = f"{author_display}: {text}"
     alert_title = f'Live Chat: "{keyword}"'
 
-    # 1. Primary: Root JSON POST (full Unicode support)
-    try:
-        resp = requests.post(
-            NTFY_SERVER,
-            json={
-                "topic": NTFY_TOPIC,
-                "title": alert_title,
-                "message": message_body,
-                "priority": 5,
-                "tags": ["rotating_light", "youtube"],
-                "click": stream_url,
-            },
-            timeout=10,
-        )
-        if resp.ok:
-            log.info("ntfy alert sent.")
-            return
-        log.warning(f"ntfy JSON alert returned status {resp.status_code}")
-    except Exception as error:
-        log.warning(f"ntfy JSON alert failed: {error}. Trying fallback...")
-
-    # 2. Fallback: Direct topic POST with clean ASCII headers
-    try:
-        url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
-        clean_title = alert_title.encode("ascii", "ignore").decode("ascii").strip() or "Live Chat Alert"
-        headers = {
-            "Title": clean_title,
-            "Priority": "5",
-            "Tags": "rotating_light,youtube",
-            "Click": stream_url,
-        }
-        resp = requests.post(url, data=message_body.encode("utf-8"), headers=headers, timeout=10)
-        if resp.ok:
-            log.info("ntfy alert sent via fallback.")
-    except Exception as error:
-        log.error(f"ntfy alert fallback failed: {error}")
+    _dispatch_ntfy_payload(
+        title=alert_title,
+        message=message_body,
+        priority=5,
+        tags=["rotating_light", "youtube"],
+        click=stream_url,
+    )
 
 
 def send_telegram_live_alert(video_id: str) -> None:
@@ -1000,47 +1028,16 @@ def send_telegram_live_alert(video_id: str) -> None:
 
 def send_ntfy_live_alert(video_id: str) -> None:
     """Send high-priority alert to ntfy when streamer goes live."""
-    if not NTFY_TOPIC:
-        return
-
     stream_url = f"https://youtu.be/{video_id}"
     alert_body = "Streamer has gone live! Click to watch the stream."
 
-    # 1. Primary: Root JSON POST (preserves full Unicode and emojis)
-    try:
-        resp = requests.post(
-            NTFY_SERVER,
-            json={
-                "topic": NTFY_TOPIC,
-                "title": "🔴 Streamer is LIVE!",
-                "message": alert_body,
-                "priority": 4,
-                "tags": ["tv", "red_circle", "youtube"],
-                "click": stream_url,
-            },
-            timeout=10,
-        )
-        if resp.ok:
-            log.info("ntfy stream-live alert sent.")
-            return
-        log.warning(f"ntfy stream-live JSON alert returned status {resp.status_code}")
-    except Exception as error:
-        log.warning(f"ntfy stream-live JSON alert failed: {error}. Trying direct fallback...")
-
-    # 2. Fallback: Direct topic POST with safe ASCII headers
-    try:
-        url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
-        headers = {
-            "Title": "Streamer is LIVE!",
-            "Priority": "4",
-            "Tags": "tv,red_circle,youtube",
-            "Click": stream_url,
-        }
-        resp = requests.post(url, data=alert_body.encode("utf-8"), headers=headers, timeout=10)
-        if resp.ok:
-            log.info("ntfy stream-live alert sent via fallback.")
-    except Exception as error:
-        log.error(f"ntfy stream-live alert fallback failed: {error}")
+    _dispatch_ntfy_payload(
+        title="🔴 Streamer is LIVE!",
+        message=alert_body,
+        priority=4,
+        tags=["tv", "red_circle", "youtube"],
+        click=stream_url,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

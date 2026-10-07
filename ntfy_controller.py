@@ -128,7 +128,24 @@ class NtfyController:
             except Exception as e:
                 log.error(f"Failed direct fallback publish to ntfy topic {self.topic}: {e}")
 
-        # 3. Mirror confirmation to Telegram if configured
+        # 3. Mirror confirmation to official ntfy.sh if configured server is custom
+        if self.server_url != "https://ntfy.sh":
+            try:
+                requests.post(
+                    "https://ntfy.sh",
+                    json={
+                        "topic": self.topic,
+                        "title": title,
+                        "message": message,
+                        "priority": priority,
+                        "tags": tags_list,
+                    },
+                    timeout=4,
+                )
+            except Exception:
+                pass
+
+        # 4. Mirror confirmation to Telegram if configured
         tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if tg_token and tg_chat_id:
@@ -327,6 +344,17 @@ class NtfyController:
         """
         log.info(f"Connecting to ntfy listener for topic: '{self.topic}' on {self.server_url}")
         poll_url = f"{self.server_url}/{self.topic}/json"
+
+        # Check server reachability; auto-switch to official https://ntfy.sh if configured server times out or is unreachable
+        try:
+            test_resp = requests.get(poll_url, params={"poll": "1", "since": "10s"}, timeout=4)
+            if not test_resp.ok and test_resp.status_code != 404:
+                raise ConnectionError(f"HTTP {test_resp.status_code}")
+        except Exception as reach_err:
+            if self.server_url != "https://ntfy.sh":
+                log.warning(f"ntfy server '{self.server_url}' is unreachable ({reach_err}). Auto-switching to official 'https://ntfy.sh'...")
+                self.server_url = "https://ntfy.sh"
+                poll_url = f"{self.server_url}/{self.topic}/json"
 
         # Initial catch-up on boot: query all recent messages to establish cursor and check for recent commands
         try:
