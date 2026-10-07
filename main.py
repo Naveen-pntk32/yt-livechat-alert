@@ -17,7 +17,7 @@ import sys
 import time
 import signal
 import logging
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 
 from yt_live_chat_alert import (
     LiveChatAlertBot,
@@ -198,6 +198,47 @@ def debug_api():
             data["candidate_test_result"] = f"Error: {e}"
 
     return jsonify(data)
+
+
+@app.route("/debug/ntfy", methods=["GET"])
+def debug_ntfy():
+    """Inspects ntfy controller thread, state, and tests connectivity."""
+    thread_obj = getattr(ntfy_controller, "_thread", None)
+    res = {
+        "version": "v1.3.0-poller-verified",
+        "thread_name": thread_obj.name if thread_obj else None,
+        "is_alive": thread_obj.is_alive() if thread_obj else False,
+        "is_running": ntfy_controller.is_running,
+        "last_id": getattr(ntfy_controller, "last_id", None),
+        "seen_ids_count": len(getattr(ntfy_controller, "seen_ids", set())),
+        "topic": ntfy_controller.topic,
+        "server": ntfy_controller.server_url,
+    }
+
+    # Test outbound GET from server environment
+    try:
+        t0 = time.time()
+        g = requests.get(
+            f"{ntfy_controller.server_url}/{ntfy_controller.topic}/json",
+            params={"poll": "1", "since": "30s"},
+            timeout=6,
+        )
+        res["outbound_get_status"] = g.status_code
+        res["outbound_get_ms"] = round((time.time() - t0) * 1000, 1)
+        res["outbound_get_bytes"] = len(g.content)
+    except Exception as e:
+        res["outbound_get_error"] = str(e)
+
+    # Test executing a command on demand if ?cmd=... provided
+    test_cmd = request.args.get("cmd")
+    if test_cmd:
+        try:
+            ntfy_controller._execute_and_reply(test_cmd)
+            res["cmd_executed"] = test_cmd
+        except Exception as e:
+            res["cmd_error"] = str(e)
+
+    return jsonify(res)
 
 
 def graceful_shutdown(signum, frame):
